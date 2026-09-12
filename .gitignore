@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+
+# Build outputs (vite outDir variants)
+dist/
+dist-full-list/
+dist-ssr/
+*.local
+
+# Vite / Vitest caches and reports
+.vite/
+coverage/
+
+# TypeScript
+*.tsbuildinfo
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Env files (keep examples)
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Rust / Tauri
+src-tauri/target/
+src-tauri/gen/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.sw?
