@@ -2,7 +2,7 @@ import { HAND_SIZE, buildDeck, shuffle, validateTurn } from '../src/game/rules.t
 import type { BoardSet, Tile, TileColor } from '../src/game/types.ts';
 import { presetCapacity } from './presets.ts';
 import { projectState } from './rooms.ts';
-import { type Db, type PublicState, ServerError, normalizeCode } from './types.ts';
+import { type Db, type DraftSet, type PublicState, ServerError, normalizeCode } from './types.ts';
 
 export type RandomFn = () => number;
 
@@ -221,6 +221,34 @@ export async function drawTile(
 }
 
 /**
+ * Shape-check a positional draft: sets with tiles plus their board cells.
+ * Set validity is NOT checked (mid-arrange boards are legitimately broken),
+ * but cells must be unique, in range, and match the tiles one-to-one.
+ */
+export function checkDraft(v: unknown, capacity: number): DraftSet[] {
+  if (!Array.isArray(v)) throw new ServerError(400, 'bad_draft', 'Draft must be an array of sets.');
+  const seen = new Set<number>();
+  return v.map((s) => {
+    if (typeof s !== 'object' || s === null) throw new ServerError(400, 'bad_draft', 'Draft sets must be objects.');
+    const { tiles, cells } = s as { tiles?: unknown; cells?: unknown };
+    if (!Array.isArray(tiles) || tiles.length === 0) {
+      throw new ServerError(400, 'bad_draft', 'Draft sets must hold tiles.');
+    }
+    if (!Array.isArray(cells) || cells.length !== tiles.length) {
+      throw new ServerError(400, 'bad_draft', 'Draft cells must match tiles one-to-one.');
+    }
+    for (const c of cells) {
+      if (!Number.isInteger(c) || (c as number) < 0 || (c as number) >= capacity) {
+        throw new ServerError(400, 'bad_draft', 'Draft cell out of range.');
+      }
+      if (seen.has(c as number)) throw new ServerError(400, 'bad_draft', 'Draft cells must be unique.');
+      seen.add(c as number);
+    }
+    return { tiles: tiles.map(checkTile), cells: cells as number[] };
+  });
+}
+
+/**
  * Publish the turn holder's in-progress arrangement for spectators.
  * Shape-checked only (mid-arrange boards are legitimately invalid);
  * only the current turn holder may publish. Cleared by commit/draw.
@@ -242,7 +270,7 @@ export async function submitDraft(
   if (!game) throw new ServerError(500, 'no_game', 'Game state missing.');
   if (game.turnSeat !== seat) throw new ServerError(409, 'not_your_turn', 'It is not your turn.');
 
-  game.draft = checkBoard(rawBoard);
+  game.draft = checkDraft(rawBoard, presetCapacity(room.preset));
   room.lastActivityAt = now;
   await db.updateRoom(room);
   await db.upsertGame(game);

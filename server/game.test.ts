@@ -203,28 +203,41 @@ describe('commitTurn', () => {
   });
 });
 
+/** Positional draft: tiles plus their exact board cells. */
+const draftAt = (tiles: Tile[], cells: number[]) => [{ tiles: tiles.map((t) => ({ ...t })), cells: [...cells] }];
+
 describe('submitDraft', () => {
-  it('shows the live arrangement to spectators but not the holder', async () => {
+  it('shows the live arrangement at true positions to spectators, not the holder', async () => {
     const { db, code } = await started(['A', 'B']);
-    await submitDraft(db, code, 0, meldBoard());
+    // Middle of the classic 18x6 board — must NOT come back packed top-left.
+    const draft = draftAt(MELD_TILES, [40, 41, 42]);
+    await submitDraft(db, code, 0, draft);
     const room = (await db.getRoom(code))!;
     expect((await projectState(db, room, 0)).draftView).toBeNull();
-    expect((await projectState(db, room, 1)).draftView).toEqual(meldBoard());
+    expect((await projectState(db, room, 1)).draftView).toEqual(draft);
   });
   it('accepts mid-arrange (invalid) boards but rejects garbage and strangers', async () => {
     const { db, code } = await started(['A', 'B']);
-    const partial: BoardSet[] = [[num('red', 4, 'r4')]]; // single tile: invalid set, fine live
+    const partial = draftAt([num('red', 4, 'r4')], [40]); // single tile: invalid set, fine live
     await submitDraft(db, code, 0, partial);
     const room = (await db.getRoom(code))!;
     expect((await projectState(db, room, 1)).draftView).toEqual(partial);
     await expectError(submitDraft(db, code, 1, partial), 409, 'not_your_turn');
-    await expectError(submitDraft(db, code, 0, [[{ id: 'x' }]]), 400, 'bad_tile');
+    await expectError(submitDraft(db, code, 0, [{ tiles: [{ id: 'x' }], cells: [0] }]), 400, 'bad_tile');
     await expectError(submitDraft(db, code, 'x', partial), 400, 'bad_seat');
+  });
+  it('rejects duplicate, mismatched, and out-of-range cells', async () => {
+    const { db, code } = await started(['A', 'B']);
+    const tiles = [num('red', 4, 'a'), num('red', 5, 'b')];
+    await expectError(submitDraft(db, code, 0, draftAt(tiles, [7, 7])), 400, 'bad_draft');
+    await expectError(submitDraft(db, code, 0, draftAt(tiles, [7])), 400, 'bad_draft');
+    await expectError(submitDraft(db, code, 0, draftAt(tiles, [0, 108])), 400, 'bad_draft');
+    await expectError(submitDraft(db, code, 0, 'nope'), 400, 'bad_draft');
   });
   it('clears the draft on commit', async () => {
     const { db, code } = await started(['A', 'B']);
     await setHand(db, code, 0, [...MELD_TILES]);
-    await submitDraft(db, code, 0, meldBoard());
+    await submitDraft(db, code, 0, draftAt(MELD_TILES, [0, 1, 2]));
     await commitTurn(db, code, 0, { board: meldBoard(), placedIds: meldIds() });
     const room = (await db.getRoom(code))!;
     // Game is over (rack emptied); winner sees the final board, no draft.

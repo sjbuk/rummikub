@@ -54,13 +54,19 @@ export interface SeatRow {
   hasMelded: boolean;
 }
 
+/** One live set with its board cells, so spectators see true positions. */
+export interface DraftSet {
+  tiles: Tile[];
+  cells: number[];
+}
+
 export interface GameRow {
   roomCode: string;
   board: BoardSet[];
   pool: Tile[];
   turnSeat: number;
   /** Live arrangement the turn holder is working on ([] = none). */
-  draft: BoardSet[];
+  draft: DraftSet[];
 }
 
 /** Public seat info: hand counts only, never tiles. */
@@ -85,7 +91,7 @@ export interface PublicState {
   yourSeat: number;
   hand: Tile[] | null;
   /** Turn holder's live draft for everyone else; null for the holder. */
-  draftView: BoardSet[] | null;
+  draftView: DraftSet[] | null;
 }
 
 /** Lobby listing entry for one open public room. */

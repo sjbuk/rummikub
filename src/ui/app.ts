@@ -1,5 +1,5 @@
 import { BOARD_PRESETS, type BoardPresetName } from '../../server/presets';
-import type { PublicSeat } from '../../server/types';
+import type { DraftSet, PublicSeat } from '../../server/types';
 import { validateTurn } from '../game/rules';
 import {
   RACK_COLS,
@@ -54,7 +54,7 @@ interface UiState {
   board: Grid;
   draft: Grid | null;
   /** Turn holder's live arrangement (for spectators; null when mine/absent). */
-  draftView: BoardSet[] | null;
+  draftView: DraftSet[] | null;
   poolCount: number;
   turnSeat: number;
   phase: 'lobby' | 'playing' | 'gameover';
@@ -242,7 +242,7 @@ export function createApp() {
     winnerSeat: number | null;
     seats: PublicSeat[];
     hand: Tile[] | null;
-    draftView: BoardSet[] | null;
+    draftView: DraftSet[] | null;
   }) {
     const dims = BOARD_PRESETS[s.preset];
     state.preset = s.preset;
@@ -278,14 +278,15 @@ export function createApp() {
     }
   }
 
-  /** Rebuild staging + board straight from a response I caused. */
-  function adoptResponse(s: { board: BoardSet[]; hand: Tile[] | null } & {
+  /** Shared board/seat fields straight from a response I caused. */
+  function adoptCommon(s: {
     preset: BoardPresetName;
     poolCount: number;
     turnSeat: number;
     phase: UiState['phase'];
     winnerSeat: number | null;
     seats: PublicSeat[];
+    board: BoardSet[];
   }) {
     const dims = BOARD_PRESETS[s.preset];
     state.preset = s.preset;
@@ -301,8 +302,55 @@ export function createApp() {
     state.draftView = null;
     state.selection = null;
     state.turnStartRack = null;
-    if (s.hand) state.rack = rackFromTiles(sortTiles(s.hand, state.sortMode));
     state.serverOk = true;
+  }
+
+  /** Rebuild staging + board straight from a response I caused. */
+  function adoptResponse(s: { board: BoardSet[]; hand: Tile[] | null } & {
+    preset: BoardPresetName;
+    poolCount: number;
+    turnSeat: number;
+    phase: UiState['phase'];
+    winnerSeat: number | null;
+    seats: PublicSeat[];
+  }) {
+    adoptCommon(s);
+    if (s.hand) state.rack = rackFromTiles(sortTiles(s.hand, state.sortMode));
+  }
+
+  /**
+   * Fold a draw response in without resetting the staging grid: auto sort
+   * modes rebuild deterministically, but a manual arrangement just gains
+   * the new tile in the first free slot. Falls back to a rebuild when the
+   * local rack has drifted from the server hand.
+   */
+  function adoptDraw(s: { hand: Tile[] | null; drew: Tile | null } & {
+    preset: BoardPresetName;
+    poolCount: number;
+    turnSeat: number;
+    phase: UiState['phase'];
+    winnerSeat: number | null;
+    seats: PublicSeat[];
+    board: BoardSet[];
+  }) {
+    adoptCommon(s);
+    if (!s.drew) return;
+    if (state.sortMode !== 'manual' && s.hand) {
+      state.rack = rackFromTiles(sortTiles(s.hand, state.sortMode));
+      return;
+    }
+    const rackIds = new Set(rackTiles(state.rack).map((t) => t.id));
+    const handIds = new Set((s.hand ?? []).map((t) => t.id));
+    const matches =
+      s.hand &&
+      handIds.size === rackIds.size + 1 &&
+      handIds.has(s.drew.id) &&
+      [...rackIds].every((id) => handIds.has(id));
+    if (matches) {
+      state.rack[firstEmptyRackSlot(state.rack)] = s.drew;
+    } else if (s.hand) {
+      state.rack = rackFromTiles(sortTiles(s.hand, state.sortMode));
+    }
   }
 
   async function withBusy<T>(fn: () => Promise<T>): Promise<T | null> {
@@ -372,7 +420,8 @@ export function createApp() {
     draftTimer = setTimeout(() => {
       draftTimer = null;
       if (!myTurn() || !state.draft) return;
-      const sets = deriveSets(state.draft, state.cols, state.rows).map((d) => d.tiles);
+      // Positional sets (tiles + cells) so spectators see true locations.
+      const sets = deriveSets(state.draft, state.cols, state.rows);
       void api.draftBoard({ code: state.code, seat: state.seat, board: sets }).catch(() => {
         // Spectating is best-effort; the commit path reports real errors.
       });
@@ -586,11 +635,10 @@ export function createApp() {
     }
     if (!s) return;
     cancelDraftBroadcast();
-    adoptResponse(s);
+    adoptDraw(s);
     if (s.drew) {
       state.justDrewId = s.drew.id;
-      sortHand();
-      // Keep the auto-sort from swallowing the marker position: the mark is by id.
+      // Marker is by id, so it survives wherever the tile lands.
       say(`Drew a tile. ${state.turnSeat === state.seat ? 'Your turn.' : `${seatName(state.turnSeat)}'s turn.`}`);
     } else {
       state.justDrewId = null;
@@ -789,9 +837,20 @@ export function createApp() {
 
   function shownGrid(): Grid {
     if (myTurn()) return state.draft ?? state.board;
-    // Spectator view: the turn holder's live arrangement when published.
+    // Spectator view: the turn holder's live arrangement at true cells.
     if (state.draftView && state.draftView.length > 0) {
-      return layoutSetsToGrid(state.draftView, state.cols, state.rows);
+      const grid: Grid = Array<Tile | null>(state.cols * state.rows).fill(null);
+      for (const set of state.draftView) {
+        // Skip pre-positional payloads still in flight during rollout.
+        if (!Array.isArray(set.cells) || !Array.isArray(set.tiles)) continue;
+        set.tiles.forEach((t, i) => {
+          const c = set.cells[i];
+          if (Number.isInteger(c) && (c as number) >= 0 && (c as number) < grid.length) {
+            grid[c as number] = t;
+          }
+        });
+      }
+      return grid;
     }
     return state.board;
   }

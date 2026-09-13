@@ -7,6 +7,7 @@ import type { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.44.4
 import type {
   BoardSet,
   Db,
+  DraftSet,
   GameRow,
   RoomRow,
   SeatRow,
@@ -38,7 +39,7 @@ interface GameRecord {
   board: BoardSet[];
   pool: Tile[];
   turn_seat: number;
-  draft: BoardSet[];
+  draft: DraftSet[];
 }
 
 function toRoom(r: RoomRecord): RoomRow {

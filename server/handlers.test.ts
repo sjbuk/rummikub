@@ -85,10 +85,11 @@ describe('game handlers', () => {
   it('publishes drafts for spectators and rejects strangers', async () => {
     const { db, code } = await lobby();
     await handleGameStart(db, { code, seat: 0 }, {});
-    const published = await handleGameDraft(db, { code, seat: 0, board: [[MELD[0]]] }, {});
+    const draft = [{ tiles: [MELD[0]], cells: [40] }];
+    const published = await handleGameDraft(db, { code, seat: 0, board: draft }, {});
     expect(published).toEqual({ status: 200, body: { ok: true } });
     const seen = await handleRoomsState(db, { code, seat: 1 });
-    expect((seen.body as { draftView: unknown }).draftView).toEqual([[MELD[0]]]);
+    expect((seen.body as { draftView: unknown }).draftView).toEqual(draft);
     const refused = await handleGameDraft(db, { code, seat: 1, board: [] }, {});
     expect(refused.status).toBe(409);
     expect(refused.body).toMatchObject({ error: 'not_your_turn' });

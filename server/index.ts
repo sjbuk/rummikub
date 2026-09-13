@@ -2,6 +2,7 @@ export { BOARD_PRESETS, isBoardPresetName, presetCapacity, type BoardPresetName 
 export {
   commitTurn,
   checkBoard,
+  checkDraft,
   checkTile,
   drawTile,
   nextTurn,

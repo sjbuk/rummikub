@@ -1,6 +1,6 @@
 import { BOARD_PRESETS, type BoardPresetName } from '../../server/presets';
 import type { BoardSet, Tile } from '../game/types';
-import type { PublicState, RoomListing } from '../../server/types';
+import type { DraftSet, PublicState, RoomListing } from '../../server/types';
 
 export { BOARD_PRESETS, type BoardPresetName };
 
@@ -69,6 +69,6 @@ export const api = {
     call<PublicState>('/game-commit', input),
   drawTile: (input: { code: string; seat: number }) => call<DrawResult>('/game-draw', input),
   getState: (input: { code: string; seat: number }) => call<PublicState>('/rooms-state', input),
-  draftBoard: (input: { code: string; seat: number; board: BoardSet[] }) =>
+  draftBoard: (input: { code: string; seat: number; board: DraftSet[] }) =>
     call<{ ok: boolean }>('/game-draft', input),
 };
