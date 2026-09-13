@@ -13,9 +13,6 @@
     "server:deploy": "npm run server:sync-shared && supabase db push && supabase functions deploy",
     "server:dev": "supabase start"
   },
-  "dependencies": {
-    "trystero": "^0.25.4"
-  },
   "devDependencies": {
     "@tauri-apps/cli": "^2.1.0",
     "supabase": "^2.117.0",

@@ -1,7 +1,7 @@
-import { buildDeck, shuffle, validateTurn, HAND_SIZE } from '../game/rules';
+import { BOARD_PRESETS, type BoardPresetName } from '../../server/presets';
+import type { PublicSeat } from '../../server/types';
+import { validateTurn } from '../game/rules';
 import {
-  GRID_COLS,
-  GRID_ROWS,
   RACK_COLS,
   deriveRackSets,
   deriveSets,
@@ -9,6 +9,7 @@ import {
   emptyRack,
   findInvalidCells,
   firstEmptyRackSlot,
+  layoutSetsToGrid,
   moveBoardSetToRack,
   moveRackSetToBoard,
   moveSet,
@@ -21,16 +22,8 @@ import {
 } from '../game/board';
 import { attachTileDrag, installDoubleTapZoomGuard, type DragDest, type DragPayload, type TileDragHooks } from './drag';
 import type { Tile } from '../game/types';
-import { makeLobbyRoom, makeRoom, randomCode, type LobbyHandle, type NetHandle, type NetMessage } from '../net/p2p';
-import {
-  ANNOUNCE_MS,
-  isLobbyMessage,
-  pruneGames,
-  upsertGame,
-  type OpenGame,
-} from '../net/lobby';
+import { ServerApiError, api } from '../net/server';
 
-type Role = 'host' | 'guest';
 type Selection =
   | { area: 'rack'; index: number }
   | { area: 'rackSet'; cells: number[] }
@@ -40,39 +33,42 @@ type Selection =
 
 interface UiState {
   screen: 'lobby' | 'game';
-  role: Role;
   code: string;
   name: string;
-  peerName: string;
+  /** My seat index in the room. */
+  seat: number;
   /** Hide my hosted game from the public lobby list. */
   isPrivate: boolean;
-  /** Open public games seen via lobby announcements. */
-  openGames: OpenGame[];
-  /** Staging grid (2×16 slots): the player's tiles, arranged freely between rounds. */
+  /** Preset picked at creation; the server is authoritative after join. */
+  preset: BoardPresetName;
+  cols: number;
+  rows: number;
+  /** Open public games seen via the server lobby list. */
+  openGames: { code: string; name: string; seatsTaken: number; preset: BoardPresetName }[];
+  seats: PublicSeat[];
+  /** Staging grid: the player's tiles, arranged freely between rounds. */
   rack: Grid;
-  /** Rack arrangement when this turn started — Revert restores it alongside the board. */
+  /** Rack arrangement when this turn started — Revert restores it. */
   turnStartRack: Grid | null;
+  /** Last committed board as laid out locally. */
   board: Grid;
   draft: Grid | null;
-  /** Live view of the opponent's in-progress turn. Cleared on commit/draw. */
-  peerView: Grid | null;
-  pool: Tile[]; // host only
   poolCount: number;
-  turn: Role;
-  melded: boolean;
-  peerMelded: boolean;
-  peerHandCount: number;
+  turnSeat: number;
+  phase: 'lobby' | 'playing' | 'gameover';
+  winnerSeat: number | null;
   /** Id of the most recently drawn rack tile, for the "new tile" marker. */
   justDrewId: string | null;
-  winner: Role | null;
   selection: Selection;
   sortMode: SortMode;
   /** Turn chime + banner enabled. Persisted in localStorage. */
   soundOn: boolean;
   message: string;
   messageKind: '' | 'error' | 'ok';
-  connected: boolean;
-  dealt: boolean;
+  /** Last server contact succeeded. */
+  serverOk: boolean;
+  /** Request in flight — buttons pause while true. */
+  busy: boolean;
 }
 
 const el = (tag: string, cls = '', text = '') => {
@@ -84,32 +80,34 @@ const el = (tag: string, cls = '', text = '') => {
 
 const TILE_LABEL: Record<string, string> = { red: 'R', blue: 'B', black: 'K', yellow: 'Y' };
 
+const POLL_MS = 2500;
+const LOBBY_POLL_MS = 5000;
+
 export function createApp() {
   const appRoot = document.getElementById('app');
   if (!appRoot) throw new Error('#app not found');
   const root: HTMLElement = appRoot;
-  let net: NetHandle | null = null;
+  const classic = BOARD_PRESETS.classic;
   const state: UiState = {
     screen: 'lobby',
-    role: 'host',
     code: '',
     name: '',
-    peerName: 'Opponent',
+    seat: 0,
     isPrivate: false,
+    preset: 'classic',
+    cols: classic.cols,
+    rows: classic.rows,
     openGames: [],
+    seats: [],
     rack: emptyRack(),
     turnStartRack: null,
     board: emptyGrid(),
     draft: null,
-    peerView: null,
-    pool: [],
     poolCount: 0,
-    turn: 'host',
-    melded: false,
-    peerMelded: false,
-    peerHandCount: HAND_SIZE,
+    turnSeat: 0,
+    phase: 'lobby',
+    winnerSeat: null,
     justDrewId: null,
-    winner: null,
     selection: null,
     sortMode: 'color',
     soundOn: ((): boolean => {
@@ -121,15 +119,17 @@ export function createApp() {
     })(),
     message: '',
     messageKind: '',
-    connected: false,
-    dealt: false,
+    serverOk: true,
+    busy: false,
   };
 
-  const myTurn = () => state.screen === 'game' && !state.winner && state.turn === state.role;
-  /** Grid shown: live draft on my turn, the opponent's live draft on theirs. */
-  const shownGrid = (): Grid => {
-    if (myTurn()) return state.draft ?? state.board;
-    return state.peerView ?? state.board;
+  const myTurn = () =>
+    state.screen === 'game' && state.phase === 'playing' && state.winnerSeat === null && state.turnSeat === state.seat;
+  const mySeat = (): PublicSeat | undefined => state.seats.find((s) => s.seat === state.seat);
+  const seatName = (seat: number): string => {
+    const s = state.seats.find((x) => x.seat === seat);
+    if (!s) return 'Player';
+    return s.seat === state.seat ? (state.name || 'You') : s.name;
   };
 
   // ---------- turn alerts: banner, tab title, chime ----------
@@ -205,121 +205,13 @@ export function createApp() {
   /** Fire the turn alert once per false→true edge while a game is live. */
   function noteTurn() {
     const mine = myTurn();
-    const becameMine = mine && !wasMyTurn && state.screen === 'game' && state.dealt && !state.winner;
+    const becameMine = mine && !wasMyTurn && state.screen === 'game' && !state.winnerSeat;
     if (becameMine) snapshotTurnStart();
     wasMyTurn = mine;
-    document.title = mine && state.screen === 'game' && !state.winner
-      ? 'Your turn! — Rummikub P2P'
-      : 'Rummikub — P2P';
+    document.title = mine && state.screen === 'game' && state.winnerSeat === null
+      ? 'Your turn! — Rummikub'
+      : 'Rummikub';
     if (becameMine) playTurnChime();
-  }
-
-  // Live spectator sync: stream the draft while arranging (debounced).
-  let draftTimer: ReturnType<typeof setTimeout> | null = null;
-  function scheduleDraftBroadcast() {
-    if (!myTurn() || !state.draft) return;
-    if (draftTimer) clearTimeout(draftTimer);
-    draftTimer = setTimeout(() => {
-      draftTimer = null;
-      if (myTurn() && state.draft) {
-        net?.send({ t: 'draft', board: [...state.draft], by: state.role });
-      }
-    }, 120);
-  }
-  // ---------- open-game discovery (serverless lobby) ----------
-  // One lobby room for the life of the home page: leaving and instantly
-  // rejoining the same room races with Trystero's async leave, so the host
-  // keeps this room and only toggles its heartbeat.
-  let lobby: LobbyHandle | null = null;
-  let watchTimer: ReturnType<typeof setInterval> | null = null;
-  let announcing = false;
-  let announceTimer: ReturnType<typeof setInterval> | null = null;
-  let announceBursts: ReturnType<typeof setTimeout>[] = [];
-  let lastLobbyPeers = -1;
-
-  const lobbySignature = (): string => state.openGames.map((g) => `${g.code}=${g.name}`).join('|');
-  const lobbyPeerCount = (): number => lobby?.peerCount() ?? 0;
-
-  /** Re-render the home page only when something visible changed. */
-  function maybeRenderLobby(before: string) {
-    if (state.screen !== 'lobby') return;
-    const peers = lobbyPeerCount();
-    if (lobbySignature() !== before || peers !== lastLobbyPeers) {
-      lastLobbyPeers = peers;
-      render();
-    }
-  }
-
-  function onLobby(data: unknown) {
-    if (!isLobbyMessage(data)) return;
-    const before = lobbySignature();
-    state.openGames = upsertGame(state.openGames, data, Date.now());
-    maybeRenderLobby(before);
-  }
-
-  /** Join the lobby room; prune quiet listings and refresh peer state. */
-  function startLobbyWatch() {
-    if (!lobby) {
-      lobby = makeLobbyRoom(onLobby);
-      lastLobbyPeers = -1;
-    }
-    if (!watchTimer) {
-      watchTimer = setInterval(() => {
-        const before = lobbySignature();
-        state.openGames = pruneGames(state.openGames, Date.now());
-        maybeRenderLobby(before);
-      }, 5000);
-    }
-  }
-
-  function stopLobbyWatch() {
-    if (watchTimer) {
-      clearInterval(watchTimer);
-      watchTimer = null;
-    }
-    if (lobby) {
-      lobby.leave();
-      lobby = null;
-    }
-    lastLobbyPeers = -1;
-  }
-
-  /** Public hosts heartbeat their game until a guest joins. */
-  function startAnnounce() {
-    if (state.isPrivate || announcing) return;
-    if (!lobby) startLobbyWatch();
-    announcing = true;
-    const code = state.code;
-    const beat = () => {
-      if (announcing && state.code === code) lobby?.send({ t: 'hosting', code, name: state.name });
-    };
-    // Burst the first beats: early ones are lost while relays connect.
-    beat();
-    announceBursts.push(setTimeout(beat, 2000), setTimeout(beat, 5000));
-    announceTimer = setInterval(beat, ANNOUNCE_MS);
-  }
-
-  function stopAnnounce() {
-    if (announceTimer) {
-      clearInterval(announceTimer);
-      announceTimer = null;
-    }
-    for (const t of announceBursts) clearTimeout(t);
-    announceBursts = [];
-    // Only the announcer withdraws; guests must never close someone's listing.
-    if (announcing && lobby && state.code) lobby.send({ t: 'closed', code: state.code });
-    announcing = false;
-  }
-
-  function joinGame(code: string, name: string) {
-    state.name = name.trim() || 'Guest';
-    state.role = 'guest';
-    state.code = code;
-    state.screen = 'game';
-    stopLobbyWatch();
-    connect(code, 'guest');
-    render();
-    say('Connecting… waiting for host to deal.');
   }
 
   const committedTiles = (): Tile[] => (state.board.filter(Boolean) as Tile[]);
@@ -331,149 +223,248 @@ export function createApp() {
     paintMessage();
   }
 
-  // ---------- networking ----------
-  function connect(code: string, role: Role) {
-    net?.leave();
-    net = makeRoom(code, onNet);
-    net.onPeerJoin(() => {
-      state.connected = true;
-      if (state.role === 'host' && !state.dealt && state.screen === 'game') deal();
-      else render();
-    });
-    net.onPeerLeave(() => {
-      state.connected = false;
-      if (state.screen === 'game' && !state.winner) say('Opponent disconnected. They can rejoin with the same code (host redeals).', 'error');
-      render();
-    });
-    setTimeout(() => net?.send({ t: 'hello', from: state.role, name: state.name }), 800);
+  function sayApiError(e: unknown, fallback: string) {
+    if (e instanceof ServerApiError) say(e.message || fallback, 'error');
+    else say(fallback, 'error');
   }
 
-  function deal() {
-    stopAnnounce();
-    const deck = shuffle(buildDeck());
-    const hostHand = deck.slice(0, HAND_SIZE);
-    const guestHand = deck.slice(HAND_SIZE, HAND_SIZE * 2);
-    state.pool = deck.slice(HAND_SIZE * 2);
-    state.sortMode = 'color';
-    state.rack = rackFromTiles(sortTiles(state.role === 'host' ? hostHand : guestHand, 'color'));
-    state.turnStartRack = null;
-    wasMyTurn = false;
-    state.board = emptyGrid();
-    state.draft = null;
-    state.peerView = null;
-    state.poolCount = state.pool.length;
-    state.turn = 'host';
-    state.melded = false;
-    state.peerMelded = false;
-    state.peerHandCount = HAND_SIZE;
-    state.justDrewId = null;
-    state.winner = null;
-    state.dealt = true;
-    net?.send({
-      t: 'deal',
-      to: 'guest',
-      hand: state.role === 'host' ? guestHand : hostHand,
-      poolCount: state.pool.length,
-      turn: 'host',
-      board: emptyGrid(),
-      names: { host: state.role === 'host' ? state.name : state.peerName },
-    });
-    say(state.turn === state.role ? 'Dealt! You start — meld 30+ or draw.' : 'Dealt! Opponent starts.', 'ok');
-    render();
+  // ---------- server state ----------
+  /** Fold a server projection into local state, preserving my arrangement. */
+  function applyState(s: {
+    preset: BoardPresetName;
+    board: { id: string }[][];
+    poolCount: number;
+    turnSeat: number;
+    phase: UiState['phase'];
+    winnerSeat: number | null;
+    seats: PublicSeat[];
+    hand: Tile[] | null;
+  }) {
+    const dims = BOARD_PRESETS[s.preset];
+    state.preset = s.preset;
+    state.cols = dims.cols;
+    state.rows = dims.rows;
+    state.seats = s.seats;
+    state.poolCount = s.poolCount;
+    state.turnSeat = s.turnSeat;
+    state.phase = s.phase;
+    state.winnerSeat = s.winnerSeat;
+    // Adopt the server board only when it actually changed (an opponent
+    // committed). My own commit/draw responses rebuild explicitly below.
+    const serverIds = new Set((s.board as { id: string }[][]).flat().map((t) => t.id));
+    const localIds = committedIds();
+    const same = serverIds.size === localIds.size && [...serverIds].every((id) => localIds.has(id));
+    if (!same) {
+      state.board = layoutSetsToGrid(s.board as import('../game/types').BoardSet[], dims.cols, dims.rows);
+      state.draft = null;
+    }
+    syncRack(s.hand);
+    state.serverOk = true;
   }
 
-  function onNet(msg: NetMessage) {
-    switch (msg.t) {
-      case 'hello':
-        if (msg.from !== state.role) {
-          state.peerName = msg.name || 'Opponent';
-          state.connected = true;
-          render();
-        }
-        break;
-      case 'deal':
-        if (msg.to === state.role) {
-          state.sortMode = 'color';
-          state.rack = rackFromTiles(sortTiles(msg.hand, 'color'));
-          state.turnStartRack = null;
-          wasMyTurn = false;
-          state.poolCount = msg.poolCount;
-          state.board = msg.board;
-          state.draft = null;
-          state.peerView = null;
-          state.turn = msg.turn as Role;
-          state.peerHandCount = HAND_SIZE;
-          state.justDrewId = null;
-          state.winner = null;
-          say(state.turn === state.role ? 'Dealt! You start — meld 30+ or draw.' : `${state.peerName} starts.`, 'ok');
-          render();
-        }
-        break;
-      case 'draft':
-        // Live view of the opponent's arranging. Stale messages (not their turn) are ignored.
-        if (msg.by !== state.role && state.turn === msg.by && !state.winner) {
-          state.peerView = msg.board;
-          render();
-        }
-        break;
-      case 'commit':
-        state.board = msg.board;
-        state.draft = null;
-        state.peerView = null;
-        state.poolCount = msg.poolCount;
-        if (msg.by !== state.role) state.peerMelded = msg.melded;
-        else state.melded = msg.melded;
-        if (msg.by !== state.role) state.peerHandCount = msg.handCount;
-        state.turn = msg.turn as Role;
-        state.selection = null;
-        if (msg.winnerId) {
-          state.winner = msg.winnerId as Role;
-          say(state.winner === state.role ? 'Rummikub! You win!' : `${state.peerName} wins.`, state.winner === state.role ? 'ok' : 'error');
-        } else {
-          say(state.turn === state.role ? 'Your turn.' : `${state.peerName}'s turn.`);
-        }
-        render();
-        break;
-      case 'drawRequest':
-        if (state.role === 'host') {
-          const tile = state.pool.pop();
-          if (!tile) return;
-          state.poolCount = state.pool.length;
-          state.turn = 'host';
-          net?.send({ t: 'drawGrant', to: 'guest', tile, poolCount: state.pool.length, turn: 'host' });
-          broadcastDrawBoard();
-          say('Your turn.');
-          render();
-        }
-        break;
-      case 'drawGrant':
-        if (msg.to === state.role) {
-          state.rack[firstEmptyRackSlot(state.rack)] = msg.tile;
-          state.justDrewId = msg.tile.id;
-          sortHand();
-          state.poolCount = msg.poolCount;
-          state.turn = msg.turn as Role;
-          state.draft = null;
-          state.peerView = null;
-          say('Drew a tile. Opponent\'s turn.');
-          render();
-        }
-        break;
-      case 'drawBoard':
-        if (msg.by !== state.role) {
-          state.peerHandCount = msg.handCount;
-          state.poolCount = msg.poolCount;
-          state.turn = msg.turn as Role;
-          state.peerView = null;
-          say('Your turn.');
-          render();
-        }
-        break;
+  /** Rebuild the staging grid when the server hand diverges (no draft: never clobber arranging). */
+  function syncRack(hand: Tile[] | null) {
+    if (!hand || state.draft) return;
+    const a = hand.map((t) => t.id).sort().join(',');
+    const b = rackTiles(state.rack).map((t) => t.id).sort().join(',');
+    if (a !== b) {
+      state.rack = rackFromTiles(sortTiles(hand, state.sortMode));
+      state.turnStartRack = null;
     }
   }
 
-  function broadcastDrawBoard() {
-    net?.send({ t: 'drawBoard', by: state.role, handCount: rackTiles(state.rack).length, poolCount: state.poolCount, turn: state.turn });
+  /** Rebuild staging + board straight from a response I caused. */
+  function adoptResponse(s: { board: import('../game/types').BoardSet[]; hand: Tile[] | null } & {
+    preset: BoardPresetName;
+    poolCount: number;
+    turnSeat: number;
+    phase: UiState['phase'];
+    winnerSeat: number | null;
+    seats: PublicSeat[];
+  }) {
+    const dims = BOARD_PRESETS[s.preset];
+    state.preset = s.preset;
+    state.cols = dims.cols;
+    state.rows = dims.rows;
+    state.seats = s.seats;
+    state.poolCount = s.poolCount;
+    state.turnSeat = s.turnSeat;
+    state.phase = s.phase;
+    state.winnerSeat = s.winnerSeat;
+    state.board = layoutSetsToGrid(s.board, dims.cols, dims.rows);
+    state.draft = null;
+    state.selection = null;
+    state.turnStartRack = null;
+    if (s.hand) state.rack = rackFromTiles(sortTiles(s.hand, state.sortMode));
+    state.serverOk = true;
+  }
+
+  async function withBusy<T>(fn: () => Promise<T>): Promise<T | null> {
+    if (state.busy) return null;
+    state.busy = true;
+    try {
+      return await fn();
+    } finally {
+      state.busy = false;
+    }
+  }
+
+  // ---------- polling ----------
+  let pollTimer: ReturnType<typeof setTimeout> | null = null;
+  let lobbyTimer: ReturnType<typeof setInterval> | null = null;
+
+  function stopPoll() {
+    if (pollTimer) {
+      clearTimeout(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  /** Poll the room while waiting or watching opponents; never on my own turn. */
+  function loopPoll() {
+    stopPoll();
+    if (state.screen !== 'game' || myTurn() || state.phase === 'gameover') return;
+    pollTimer = setTimeout(tick, POLL_MS);
+  }
+
+  async function tick() {
+    pollTimer = null;
+    if (state.screen !== 'game' || myTurn()) {
+      loopPoll();
+      return;
+    }
+    try {
+      const s = await api.getState({ code: state.code, seat: state.seat });
+      applyState(s);
+      render();
+    } catch (e) {
+      if (e instanceof ServerApiError && (e.error === 'no_room' || e.error === 'no_seat')) {
+        say('This room is gone — back to the lobby.', 'error');
+        backToLobby();
+        return;
+      }
+      state.serverOk = e instanceof ServerApiError ? e.status !== 0 : false;
+      render();
+    }
+    loopPoll();
+  }
+
+  function startLobbyPoll() {
+    stopLobbyPoll();
+    void refreshLobby();
+    lobbyTimer = setInterval(() => void refreshLobby(), LOBBY_POLL_MS);
+  }
+
+  function stopLobbyPoll() {
+    if (lobbyTimer) {
+      clearInterval(lobbyTimer);
+      lobbyTimer = null;
+    }
+  }
+
+  const lobbySignature = (): string => state.openGames.map((g) => `${g.code}=${g.name}:${g.seatsTaken}`).join('|');
+
+  async function refreshLobby() {
+    if (state.screen !== 'lobby') return;
+    const before = lobbySignature();
+    try {
+      const { rooms } = await api.listRooms();
+      state.openGames = rooms;
+      state.serverOk = true;
+    } catch {
+      state.serverOk = false;
+    }
+    if (lobbySignature() !== before) render();
+  }
+
+  // ---------- room actions ----------
+  function enterGame(code: string, seat: number) {
+    state.code = code;
+    state.seat = seat;
+    state.screen = 'game';
+    state.board = emptyGrid(state.cols * state.rows);
+    state.draft = null;
+    state.turnStartRack = null;
+    state.selection = null;
+    state.justDrewId = null;
+    wasMyTurn = false;
+    stopLobbyPoll();
+    history.replaceState(null, '', `#room=${code}`);
+    render();
+    loopPoll();
+  }
+
+  async function doCreate(name: string, preset: BoardPresetName, isPrivate: boolean) {
+    let s;
+    try {
+      s = await withBusy(() => api.createRoom({ name, isPublic: !isPrivate, preset }));
+    } catch (e) {
+      sayApiError(e, 'Could not create the room.');
+      render();
+      return;
+    }
+    if (!s) return;
+    state.name = name.trim() || 'Host';
+    applyState(s);
+    say(isPrivate ? `Room ${s.code} created — share the code.` : `Room ${s.code} open — waiting for players.`, 'ok');
+    enterGame(s.code, s.yourSeat);
+  }
+
+  async function doJoin(code: string, name: string) {
+    const clean = code.trim().toUpperCase();
+    if (!clean) return;
+    let s;
+    try {
+      s = await withBusy(() => api.joinRoom({ code: clean, name }));
+    } catch (e) {
+      sayApiError(e, 'Could not join the room.');
+      render();
+      return;
+    }
+    if (!s) return;
+    state.name = name.trim() || 'Guest';
+    applyState(s);
+    say(`Joined room ${s.code} as ${seatName(s.yourSeat)}.`, 'ok');
+    enterGame(s.code, s.yourSeat);
+  }
+
+  async function doLeave() {
+    stopPoll();
+    try {
+      await api.leaveRoom({ code: state.code, seat: state.seat });
+    } catch {
+      // Leaving is best-effort; the room expires on its own.
+    }
+    backToLobby();
+  }
+
+  function backToLobby() {
+    stopPoll();
+    Object.assign(state, {
+      screen: 'lobby', code: '', seat: 0, seats: [], rack: emptyRack(), turnStartRack: null,
+      board: emptyGrid(), draft: null, poolCount: 0, turnSeat: 0, phase: 'lobby',
+      winnerSeat: null, selection: null, justDrewId: null, message: '', busy: false,
+    } as Partial<UiState>);
+    wasMyTurn = false;
+    history.replaceState(null, '', location.pathname);
+    startLobbyPoll();
+    render();
+  }
+
+  async function doStart() {
+    let s;
+    try {
+      s = await withBusy(() => api.startGame({ code: state.code, seat: state.seat }));
+    } catch (e) {
+      sayApiError(e, 'Could not start the game.');
+      render();
+      return;
+    }
+    if (!s) return;
+    adoptResponse(s);
+    say(state.turnSeat === state.seat ? 'Dealt! You start — meld 30+ or draw.' : 'Dealt! Watch for your turn.', 'ok');
+    render();
+    loopPoll();
   }
 
   // ---------- turn actions ----------
@@ -540,37 +531,39 @@ export function createApp() {
     return state.turnStartRack.some((t, i) => (t?.id ?? null) !== (state.rack[i]?.id ?? null));
   }
 
-  function doDraw() {
-    if (!myTurn()) return;
+  async function doDraw() {
+    if (!myTurn() || state.busy) return;
     if (state.draft && draftDiffers()) {
       say('You moved tiles — End Turn or Revert before drawing.', 'error');
       return;
     }
-    if (state.role === 'host') {
-      const tile = state.pool.pop();
-      if (!tile) {
-        say('Pool is empty.', 'error');
-        return;
-      }
-      state.rack[firstEmptyRackSlot(state.rack)] = tile;
-      state.justDrewId = tile.id;
-      sortHand();
-      state.poolCount = state.pool.length;
-      state.turn = 'guest';
-      state.draft = null;
-      broadcastDrawBoard();
-      say('Drew a tile. Opponent\'s turn.');
+    let s;
+    try {
+      s = await withBusy(() => api.drawTile({ code: state.code, seat: state.seat }));
+    } catch (e) {
+      sayApiError(e, 'Could not draw a tile.');
       render();
-    } else {
-      say('Requesting a tile from host…');
-      net?.send({ t: 'drawRequest', by: 'guest' });
+      return;
     }
+    if (!s) return;
+    adoptResponse(s);
+    if (s.drew) {
+      state.justDrewId = s.drew.id;
+      sortHand();
+      // Keep the auto-sort from swallowing the marker position: the mark is by id.
+      say(`Drew a tile. ${state.turnSeat === state.seat ? 'Your turn.' : `${seatName(state.turnSeat)}'s turn.`}`);
+    } else {
+      state.justDrewId = null;
+      say('Pool is empty — turn passes.', 'error');
+    }
+    render();
+    loopPoll();
   }
 
-  function doEndTurn() {
-    if (!myTurn()) return;
+  async function doEndTurn() {
+    if (!myTurn() || state.busy) return;
     const grid = ensureDraft();
-    const sets = deriveSets(grid).map((d) => d.tiles);
+    const sets = deriveSets(grid, state.cols, state.rows).map((d) => d.tiles);
     const beforeIds = committedIds();
     const placedIds = sets.flat().map((t) => t.id).filter((id) => !beforeIds.has(id));
     if (placedIds.length === 0 && draftDiffers()) {
@@ -581,52 +574,45 @@ export function createApp() {
       say('Play tiles or Draw.', 'error');
       return;
     }
-    const beforeSets = deriveSets(state.board).map((d) => d.tiles);
-    const check = validateTurn({ beforeBoard: beforeSets, afterBoard: sets, placedIds, hasMelded: state.melded });
+    // Fast local pre-check; the server re-validates authoritatively.
+    const beforeSets = deriveSets(state.board, state.cols, state.rows).map((d) => d.tiles);
+    const me = mySeat();
+    const check = validateTurn({ beforeBoard: beforeSets, afterBoard: sets, placedIds, hasMelded: me?.hasMelded ?? false });
     if (!check.ok) {
       say(check.reason ?? 'Invalid turn.', 'error');
       return;
     }
-    const placedSet = new Set(placedIds);
-    // Played tiles already left the staging grid when placed; drop any stragglers.
-    state.rack = state.rack.map((t) => (t && placedSet.has(t.id) ? null : t));
-    if (state.justDrewId && placedSet.has(state.justDrewId)) state.justDrewId = null;
-    // Commit the grid as arranged — positions are preserved for both players.
-    state.board = [...grid];
-    state.draft = null;
-    state.melded = true;
-    state.selection = null;
-    const won = myTiles().length === 0;
-    const next: Role = state.role === 'host' ? 'guest' : 'host';
-    state.turn = won ? state.role : next;
-    if (won) state.winner = state.role;
-    net?.send({
-      t: 'commit',
-      board: [...grid],
-      by: state.role,
-      melded: true,
-      handCount: myTiles().length,
-      poolCount: state.poolCount,
-      turn: state.turn,
-      ...(won ? { winnerId: state.role } : {}),
-    });
-    say(won ? 'Rummikub! You win!' : 'Nice play! Opponent\'s turn.', 'ok');
+    let s;
+    try {
+      s = await withBusy(() => api.commitTurn({ code: state.code, seat: state.seat, board: sets, placedIds }));
+    } catch (e) {
+      sayApiError(e, 'Server rejected the turn.');
+      render();
+      return;
+    }
+    if (!s) return;
+    if (state.justDrewId && placedIds.includes(state.justDrewId)) state.justDrewId = null;
+    adoptResponse(s);
+    if (s.winnerSeat !== null && s.winnerSeat !== undefined) {
+      say(s.winnerSeat === state.seat ? 'Rummikub! You win!' : `${seatName(s.winnerSeat)} wins.`, s.winnerSeat === state.seat ? 'ok' : 'error');
+    } else {
+      say(state.turnSeat === state.seat ? 'Your turn.' : `Nice play! ${seatName(state.turnSeat)}'s turn.`, 'ok');
+    }
     render();
+    loopPoll();
   }
 
   function doRevert() {
-    // Restore both grids to the turn start — no sorting, the snapshot keeps the prep.
+    // Restore the staging grid to the turn start and drop the draft.
     if (state.turnStartRack) state.rack = [...state.turnStartRack];
     state.draft = null;
     state.selection = null;
-    // Spectator sees the reset too.
-    if (myTurn()) net?.send({ t: 'draft', board: [...state.board], by: state.role });
     say('Board and staging area reverted.');
     render();
   }
   // ---------- selection & placement on the slot grid ----------
   function setForCell(grid: Grid, cell: number): number[] | null {
-    for (const d of deriveSets(grid)) {
+    for (const d of deriveSets(grid, state.cols, state.rows)) {
       if (d.cells.includes(cell)) return d.cells;
     }
     return null;
@@ -654,7 +640,7 @@ export function createApp() {
       state.rack[s.index] = occ ?? null;
       draft[cell] = t;
     } else if (s.area === 'rackSet') {
-      const moved = moveRackSetToBoard(state.rack, draft, s.cells, cell);
+      const moved = moveRackSetToBoard(state.rack, draft, s.cells, cell, state.cols);
       if (!moved) {
         say("That set doesn't fit there — it needs a free stretch in one row.", 'error');
         return;
@@ -664,7 +650,7 @@ export function createApp() {
     } else if (s.area === 'cell') {
       state.draft = moveTile(draft, s.cell, cell);
     } else {
-      const moved = moveSet(draft, s.cells, cell);
+      const moved = moveSet(draft, s.cells, cell, state.cols);
       if (!moved) {
         say("That set doesn't fit there — it needs a free stretch in one row.", 'error');
         return;
@@ -672,7 +658,6 @@ export function createApp() {
       state.draft = moved;
     }
     state.selection = null;
-    scheduleDraftBroadcast();
     render();
   }
 
@@ -715,7 +700,6 @@ export function createApp() {
       draft[s.cell] = occ;
       state.rack[slot] = tile;
       state.selection = null;
-      scheduleDraftBroadcast();
       render();
       return;
     }
@@ -742,7 +726,6 @@ export function createApp() {
     state.rack = moved.rack;
     state.selection = null;
     markManual();
-    scheduleDraftBroadcast();
     render();
   }
 
@@ -757,6 +740,11 @@ export function createApp() {
     const dbl = lastTap.key === key && now - lastTap.time < DOUBLE_TAP_MS;
     lastTap = { key, time: now };
     return dbl;
+  }
+
+  function shownGrid(): Grid {
+    if (myTurn()) return state.draft ?? state.board;
+    return state.board;
   }
 
   function clickCell(cell: number) {
@@ -874,10 +862,13 @@ export function createApp() {
   // ---------- rendering ----------
   function tileEl(tile: Tile, extra = ''): HTMLElement {
     const d = el('div', `tile ${tile.kind === 'joker' ? 'joker' : tile.color} ${extra}`.trim());
+    // textContent keeps peer-independent rendering XSS-safe; values are ours.
     if (tile.kind === 'joker') {
       d.innerHTML = '<span>J★</span><small>JOKER</small>';
     } else {
-      d.innerHTML = `<span>${tile.value}</span><small>${TILE_LABEL[tile.color]}</small>`;
+      const span = el('span', '', String(tile.value));
+      const small = el('small', '', TILE_LABEL[tile.color]);
+      d.append(span, small);
     }
     return d;
   }
@@ -897,33 +888,43 @@ export function createApp() {
     }
   }
 
+  function serverPill(): HTMLElement {
+    return el('div', 'pill', state.serverOk ? '● server' : '○ reconnecting…');
+  }
+
   function renderLobby() {
     const wrap = el('div');
     const bar = el('div', 'topbar');
-    bar.append(el('div', 'brand', 'Rummikub P2P'), el('div', 'pill', 'no server · WebRTC'));
+    bar.append(el('div', 'brand', 'Rummikub'), serverPill());
     const brand = bar.firstChild as HTMLElement;
-    brand.innerHTML = 'Rummikub P2P<small>peer-to-peer · no game server</small>';
+    brand.innerHTML = 'Rummikub<small>2–4 players · game server</small>';
     wrap.append(bar);
 
     const grid = el('div', 'grid2');
     const hostCard = el('div', 'card');
-    hostCard.append(el('h2', '', 'Host a game'), el('p', 'muted', 'Create a room and share the code. You deal first.'));
+    hostCard.append(el('h2', '', 'Host a game'), el('p', 'muted', 'Create a room for 2–4 players. You move first.'));
     const nameH = document.createElement('input');
     nameH.placeholder = 'Your name';
     nameH.value = state.name;
     nameH.oninput = () => { state.name = nameH.value; };
+    const presetRow = el('div', 'preset-row');
+    const presets: BoardPresetName[] = ['small', 'classic', 'large'];
+    let picked: BoardPresetName = state.preset;
+    for (const p of presets) {
+      const label = document.createElement('label');
+      label.className = 'check';
+      const radio = document.createElement('input');
+      radio.type = 'radio';
+      radio.name = 'preset';
+      radio.checked = p === picked;
+      radio.onchange = () => { picked = p; };
+      const dims = BOARD_PRESETS[p];
+      label.append(radio, document.createTextNode(` ${p} (${dims.cols}×${dims.rows})`));
+      presetRow.append(label);
+    }
     const hostBtn = el('button', '', 'Create room') as HTMLButtonElement;
-    hostBtn.onclick = () => {
-      state.name = nameH.value.trim() || 'Host';
-      state.role = 'host';
-      state.code = randomCode();
-      state.screen = 'game';
-      state.dealt = false;
-      connect(state.code, 'host');
-      startAnnounce();
-      history.replaceState(null, '', `#room=${state.code}`);
-      render();
-    };
+    hostBtn.disabled = state.busy;
+    hostBtn.onclick = () => void doCreate(nameH.value, picked, privBox.checked);
     const privLabel = document.createElement('label');
     privLabel.className = 'check';
     const privBox = document.createElement('input');
@@ -933,10 +934,10 @@ export function createApp() {
       state.isPrivate = privBox.checked;
     };
     privLabel.append(privBox, document.createTextNode(' Private — hide from the open games list'));
-    hostCard.append(nameH, el('br'), el('br'), hostBtn, privLabel);
+    hostCard.append(nameH, el('br'), el('br'), presetRow, el('br'), hostBtn, privLabel);
 
     const joinCard = el('div', 'card');
-    joinCard.append(el('h2', '', 'Join a game'), el('p', 'muted', 'Enter the room code from your opponent.'));
+    joinCard.append(el('h2', '', 'Join a game'), el('p', 'muted', 'Enter the room code from your host.'));
     const nameJ = document.createElement('input');
     nameJ.placeholder = 'Your name';
     nameJ.oninput = () => { state.name = nameJ.value; };
@@ -946,11 +947,8 @@ export function createApp() {
     const fromHash = location.hash.match(/room=([A-Za-z0-9]+)/);
     if (fromHash) codeIn.value = fromHash[1].toUpperCase();
     const joinBtn = el('button', '', 'Join room') as HTMLButtonElement;
-    joinBtn.onclick = () => {
-      const code = codeIn.value.trim().toUpperCase();
-      if (!code) return;
-      joinGame(code, nameJ.value);
-    };
+    joinBtn.disabled = state.busy;
+    joinBtn.onclick = () => void doJoin(codeIn.value, nameJ.value);
     joinCard.append(nameJ, el('br'), el('br'), codeIn, el('br'), el('br'), joinBtn);
 
     grid.append(hostCard, joinCard);
@@ -960,63 +958,54 @@ export function createApp() {
     openCard.style.marginTop = '16px';
     openCard.append(el('h2', '', 'Open games'));
     if (state.openGames.length === 0) {
-      openCard.append(el('p', 'muted', 'No open games right now — host one above or enter a code.'));
+      openCard.append(el('p', 'muted', state.serverOk
+        ? 'No open games right now — host one above or enter a code.'
+        : 'Could not reach the game server — check your connection.'));
     } else {
       const list = el('div', 'open-list');
       for (const g of state.openGames) {
         const row = el('div', 'open-row');
-        row.append(el('div', 'open-name', `${g.name}’s game`), el('div', 'pill', g.code));
+        row.append(
+          el('div', 'open-name', `${g.name}’s game (${g.seatsTaken}/4, ${g.preset})`),
+          el('div', 'pill', g.code),
+        );
         const joinOpen = el('button', '', 'Join') as HTMLButtonElement;
-        joinOpen.onclick = () => joinGame(g.code, nameJ.value);
+        joinOpen.disabled = state.busy;
+        joinOpen.onclick = () => void doJoin(g.code, nameJ.value || state.name);
         row.append(joinOpen);
         list.append(row);
       }
       openCard.append(list);
     }
-    const peers = lobbyPeerCount();
-    openCard.append(
-      el('p', 'muted', peers > 0
-        ? `Lobby live — ${peers} peer${peers === 1 ? '' : 's'} nearby.`
-        : 'Connecting to the lobby… listings appear once connected.'),
-    );
     wrap.append(openCard);
     const rules = el('div', 'card');
     rules.style.marginTop = '16px';
     rules.innerHTML = `<h2>How it works</h2>
-      <p class="muted">Tiles sync directly between your two browsers over WebRTC (Trystero matchmaking — no game server stores state).
+      <p class="muted">Rooms run on the game server for 2–4 players — no accounts, just a name and a room code.
       First meld needs 30+ points from your own rack. After that you may rearrange the whole board, as long as every
       set is valid when you end your turn. The board is a grid of slots with a gap between sets: click a tile, then click
       its destination — tap twice to grab a whole set — or drag it.</p>`;
     wrap.append(rules);
     root.append(wrap);
+    paintMessage();
   }
+
   function renderGame() {
     const wrap = el('div', 'game');
     const bar = el('div', 'topbar');
     const brand = el('div', 'brand inline');
-    brand.innerHTML = `Rummikub P2P <small>room <span class="code">${state.code}</span></small>`;
+    brand.innerHTML = `Rummikub <small>room <span class="code">${state.code}</span> · seat ${state.seat + 1} · ${state.preset}</small>`;
     const leave = el('button', 'secondary', 'Leave') as HTMLButtonElement;
-    leave.onclick = () => {
-      net?.leave();
-      net = null;
-      stopAnnounce();
-      Object.assign(state, {
-        screen: 'lobby', rack: emptyRack(), turnStartRack: null, board: emptyGrid(), draft: null, peerView: null, pool: [],
-        winner: null, dealt: false, connected: false, message: '', justDrewId: null,
-      } as Partial<UiState>);
-      wasMyTurn = false;
-      startLobbyWatch();
-      render();
-    };
+    leave.onclick = () => void doLeave();
     bar.append(brand, leave);
     wrap.append(bar);
 
-    const status = el('div', `statusbar${myTurn() && !state.winner ? ' my-turn' : ''}`);
+    const status = el('div', `statusbar${myTurn() && state.winnerSeat === null ? ' my-turn' : ''}`);
     const turnPill = el('div', `pill ${myTurn() ? 'turn' : ''}`,
-      state.winner ? `Winner: ${state.winner === state.role ? state.name || 'You' : state.peerName}`
-        : !state.dealt ? 'Waiting for opponent…'
+      state.winnerSeat !== null ? `Winner: ${seatName(state.winnerSeat)}`
+        : state.phase === 'lobby' ? 'Waiting to start…'
           : myTurn() ? 'Your turn — arrange, then End Turn'
-            : state.peerView ? `${state.peerName} is arranging…` : `${state.peerName}'s turn`);
+            : `${seatName(state.turnSeat)}'s turn`);
     const soundBtn = el('button', 'secondary sound-toggle', state.soundOn ? 'Sound: on' : 'Sound: off') as HTMLButtonElement;
     soundBtn.title = 'Toggle the turn alert sound';
     soundBtn.onclick = toggleSound;
@@ -1025,27 +1014,53 @@ export function createApp() {
     statusMsg.setAttribute('data-msg', '1');
     status.append(
       turnPill,
-      el('div', 'pill', `Pool: ${state.role === 'host' ? state.pool.length : state.poolCount}`),
-      el('div', 'pill', `${state.peerName}: ${state.role === 'host' ? state.peerHandCount : '—'} tiles`),
-      el('div', 'pill', state.melded ? 'Melded ✓' : 'Need 30+ meld'),
-      el('div', 'pill', state.connected ? '● live' : '○ waiting…'),
+      el('div', 'pill', `Pool: ${state.poolCount}`),
+      el('div', 'pill', (mySeat()?.hasMelded ?? false) ? 'Melded ✓' : 'Need 30+ meld'),
+      serverPill(),
       soundBtn,
       statusMsg,
     );
     wrap.append(status);
 
     // Screen-reader turn announcement that takes up no space.
-    if (myTurn() && !state.winner) {
+    if (myTurn() && state.winnerSeat === null) {
       const live = el('div', 'sr-only', 'Your turn — play tiles or draw a tile');
       live.setAttribute('role', 'status');
       wrap.append(live);
     }
 
+    // Seats strip: every player, hand counts, turn + connection markers.
+    const seatsCard = el('div', 'card');
+    const seatsList = el('div', 'open-list');
+    for (const s of state.seats) {
+      const row = el('div', 'open-row');
+      const marker = s.seat === state.turnSeat && state.phase === 'playing' ? ' ▶' : '';
+      row.append(
+        el('div', 'open-name', `${s.seat === state.seat ? (state.name || 'You') : s.name}${s.seat === 0 ? ' (host)' : ''}${marker}`),
+        el('div', 'pill', `${s.handCount} tiles${s.connected ? '' : ' · away'}`),
+      );
+      seatsList.append(row);
+    }
+    seatsCard.append(seatsList);
+    // Waiting room: host starts when 2+ seats are connected.
+    if (state.phase === 'lobby') {
+      const connected = state.seats.filter((s) => s.connected).length;
+      if (state.seat === 0) {
+        const startBtn = el('button', '', connected >= 2 ? `Start game (${connected} players)` : 'Need 2+ players to start') as HTMLButtonElement;
+        startBtn.disabled = state.busy || connected < 2;
+        startBtn.onclick = () => void doStart();
+        seatsCard.append(startBtn);
+      } else {
+        seatsCard.append(el('p', 'muted', 'Waiting for the host to start…'));
+      }
+    }
+    wrap.append(seatsCard);
+
     if (myTurn()) ensureDraft();
     const grid = shownGrid();
     const setOfCell = new Map<number, number>();
-    deriveSets(grid).forEach((d, i) => d.cells.forEach((c) => setOfCell.set(c, i)));
-    const invalid = findInvalidCells(grid);
+    deriveSets(grid, state.cols, state.rows).forEach((d, i) => d.cells.forEach((c) => setOfCell.set(c, i)));
+    const invalid = findInvalidCells(grid, state.cols, state.rows);
 
     // One drag controller for both grids (mouse, touch, pen). The grid
     // elements are assigned as they are built; no pointer event can fire
@@ -1063,9 +1078,9 @@ export function createApp() {
     const boardCard = el('div', 'card');
     boardCard.append(el('h2', '', 'Board'));
     const boardEl = el('div', 'grid-board board-grid');
-    boardEl.style.setProperty('--cols', String(GRID_COLS));
+    boardEl.style.setProperty('--cols', String(state.cols));
     boardGridRef = boardEl;
-    for (let cell = 0; cell < GRID_COLS * GRID_ROWS; cell++) {
+    for (let cell = 0; cell < state.cols * state.rows; cell++) {
       const tile = grid[cell];
       const cellEl = el('div', 'cell' + (tile ? '' : ' empty'));
       const setIdx = setOfCell.get(cell);
@@ -1122,11 +1137,11 @@ export function createApp() {
 
     const toolbar = el('div', 'toolbar vertical');
     const endBtn = el('button', '', 'End Turn') as HTMLButtonElement;
-    endBtn.disabled = !myTurn();
-    endBtn.onclick = doEndTurn;
+    endBtn.disabled = !myTurn() || state.busy;
+    endBtn.onclick = () => void doEndTurn();
     const drawBtn = el('button', 'secondary', 'Draw tile') as HTMLButtonElement;
-    drawBtn.disabled = !myTurn();
-    drawBtn.onclick = doDraw;
+    drawBtn.disabled = !myTurn() || state.busy;
+    drawBtn.onclick = () => void doDraw();
     const sortBtn = el('button', 'secondary', SORT_LABEL[state.sortMode]) as HTMLButtonElement;
     sortBtn.title = 'Staging order — click to cycle colour, number, manual';
     sortBtn.onclick = cycleSortMode;
@@ -1142,7 +1157,7 @@ export function createApp() {
     paintMessage();
   }
 
-  startLobbyWatch();
+  startLobbyPoll();
   render();
   return { render, state };
 }

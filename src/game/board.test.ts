@@ -47,6 +47,38 @@ describe('slot grid', () => {
     // First set occupies row 0 cols 0..13, gap would be col 14, so next set wraps.
     expect(grid[GRID_COLS]?.id).toBe('x');
   });
+  it('lays out and reads back with preset dimensions', () => {
+    const sets = [
+      [num(1, 'a'), num(2, 'b'), num(3, 'c')],
+      [num(7, 'd'), num(7, 'e'), num(7, 'f')],
+    ];
+    const cols = 12;
+    const rows = 4;
+    const grid = layoutSetsToGrid(sets, cols, rows);
+    expect(grid).toHaveLength(cols * rows);
+    const back = deriveSets(grid, cols, rows).map((s) => s.tiles.map((t) => t.id));
+    expect(back).toEqual([
+      ['a', 'b', 'c'],
+      ['d', 'e', 'f'],
+    ]);
+    expect(emptyGrid(cols * rows)).toHaveLength(cols * rows);
+  });
+  it('drops sets past a small grid instead of overflowing', () => {
+    const sets = [
+      [num(1, 'a'), num(2, 'b'), num(3, 'c')],
+      [num(4, 'd'), num(5, 'e'), num(6, 'f')],
+    ];
+    const grid = layoutSetsToGrid(sets, 4, 1); // one row of 4: only the first set fits
+    expect(deriveSets(grid, 4, 1).map((s) => s.tiles.map((t) => t.id))).toEqual([['a', 'b', 'c']]);
+  });
+  it('moves a rack set onto a narrow board', () => {
+    const rack = [num(1, 'a'), num(2, 'b'), null, null];
+    const board = emptyGrid(12 * 4);
+    const moved = moveRackSetToBoard(rack, board, [0, 1], 10, 12);
+    expect(moved?.board[10]?.id).toBe('a');
+    expect(moved?.board[11]?.id).toBe('b');
+    expect(moveRackSetToBoard(rack, board, [0, 1], 11, 12)).toBeNull(); // would wrap
+  });
   it('round-trips sets through the grid', () => {
     const sets = [
       [num(1, 'a'), num(2, 'b'), num(3, 'c')],

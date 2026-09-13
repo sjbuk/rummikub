@@ -13,8 +13,8 @@ export const RACK_SIZE = RACK_COLS * RACK_ROWS;
 /** Main board: fixed grid of slots, each holding a tile or nothing. */
 export type Grid = (Tile | null)[];
 
-export function emptyGrid(): Grid {
-  return Array<Tile | null>(GRID_SIZE).fill(null);
+export function emptyGrid(size: number = GRID_SIZE): Grid {
+  return Array<Tile | null>(size).fill(null);
 }
 
 /** Empty player staging grid. Grows by whole rows when a big hand needs it. */
@@ -92,24 +92,25 @@ export function cellCol(cell: number, cols: number = GRID_COLS): number {
 /**
  * Lay committed sets into the grid, left to right with one empty slot
  * between sets, wrapping to the next row when a set no longer fits.
+ * Defaults match the classic preset; pass the room preset dims instead.
  */
-export function layoutSetsToGrid(sets: BoardSet[]): Grid {
-  const grid: Grid = Array<Tile | null>(GRID_SIZE).fill(null);
+export function layoutSetsToGrid(sets: BoardSet[], cols: number = GRID_COLS, rows: number = GRID_ROWS): Grid {
+  const grid: Grid = Array<Tile | null>(cols * rows).fill(null);
   let r = 0;
   let c = 0;
   for (const set of sets) {
     if (set.length === 0) continue;
-    if (c + set.length > GRID_COLS) {
+    if (c + set.length > cols) {
       r++;
       c = 0;
     }
-    if (r >= GRID_ROWS) break; // overflow guard: 108 slots far exceeds 2-player needs
+    if (r >= rows) break; // overflow guard: committed sets beyond capacity are dropped
     for (const t of set) {
-      grid[r * GRID_COLS + c] = t;
+      grid[r * cols + c] = t;
       c++;
     }
     c++; // one empty slot between sets
-    if (c >= GRID_COLS) {
+    if (c >= cols) {
       r++;
       c = 0;
     }
@@ -207,22 +208,22 @@ export function canPlaceSet(grid: Grid, cells: number[], target: number, cols: n
  * Lift a whole contiguous run from the staging grid onto the board.
  * The board target needs a free stretch in one row; the rack cells clear.
  */
-export function moveRackSetToBoard(rack: Grid, board: Grid, cells: number[], target: number): { rack: Grid; board: Grid } | null {
+export function moveRackSetToBoard(rack: Grid, board: Grid, cells: number[], target: number, cols: number = GRID_COLS): { rack: Grid; board: Grid } | null {
   if (cells.length === 0) return null;
-  const tRow = cellRow(target, GRID_COLS);
-  const tCol = cellCol(target, GRID_COLS);
-  if (tCol + cells.length > GRID_COLS) return null;
+  const tRow = cellRow(target, cols);
+  const tCol = cellCol(target, cols);
+  if (tCol + cells.length > cols) return null;
   // Strict occupancy: cross-grid moves have no owned-cell carve-out.
   // (canPlaceSet covers the same-grid case used for hover highlights.)
   for (let k = 0; k < cells.length; k++) {
-    if (board[tRow * GRID_COLS + tCol + k]) return null;
+    if (board[tRow * cols + tCol + k]) return null;
   }
   const tiles = cells.map((c) => rack[c]);
   if (tiles.some((t) => !t)) return null;
   const nextRack = [...rack];
   const nextBoard = [...board];
   for (const c of cells) nextRack[c] = null;
-  for (let k = 0; k < cells.length; k++) nextBoard[tRow * GRID_COLS + tCol + k] = tiles[k];
+  for (let k = 0; k < cells.length; k++) nextBoard[tRow * cols + tCol + k] = tiles[k];
   return { rack: nextRack, board: nextBoard };
 }
 

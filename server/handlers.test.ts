@@ -9,6 +9,7 @@ import {
   handleRoomsJoin,
   handleRoomsLeave,
   handleRoomsList,
+  handleRoomsState,
 } from './handlers';
 import type { Tile } from '../src/game/types';
 
@@ -90,6 +91,24 @@ describe('game handlers', () => {
     const bad = await handleGameCommit(db, { code, seat: 1, board: [], placedIds: [] }, {});
     expect(bad.status).toBe(409);
     expect(bad.body).toMatchObject({ error: 'not_your_turn' });
+  });
+});
+
+describe('handleRoomsState', () => {
+  it('returns the state projection for a seated player', async () => {
+    const { db, code } = await lobby();
+    const res = await handleRoomsState(db, { code, seat: 0 });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ code, yourSeat: 0, phase: 'lobby' });
+    expect((res.body as { hand: unknown }).hand).toEqual([]);
+  });
+  it('hides other hands and rejects strangers', async () => {
+    const { db, code } = await lobby();
+    const res = await handleRoomsState(db, { code, seat: 1 });
+    expect(res.body).toMatchObject({ yourSeat: 1 });
+    expect(await handleRoomsState(db, { code, seat: 5 })).toMatchObject({ status: 404 });
+    expect(await handleRoomsState(db, { code: 'ZZZ99', seat: 0 })).toMatchObject({ status: 404 });
+    expect(await handleRoomsState(db, { code, seat: 'x' })).toMatchObject({ status: 400 });
   });
 });
 

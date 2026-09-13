@@ -1,8 +1,9 @@
 # Game server (Supabase) — design and contract
 
-Status: implemented — `server/` core (44 Vitest tests), Supabase
-migrations, and 8 Edge Functions. The P2P client in `src/` is unchanged;
-this document is the contract the server satisfies. Setup and deploy steps:
+Status: implemented and wired up — `server/` core, Supabase migrations,
+9 Edge Functions (rooms-*, game-*, rooms-state polling read), and the web
+client in `src/` plays through them (2–4 seats, preset-sized boards,
+2.5 s state polling, server-validated commits). Setup and deploy steps:
 see `server/README.md`.
 
 ## Decisions (agreed)
@@ -20,9 +21,10 @@ see `server/README.md`.
 - Postgres tables: `rooms` (code, public flag, board preset, phase,
   `lastActivityAt`), `seats` (room, seat index, display name, connected),
   `games` (board, pool, turn pointer, meld flags, `winnerId`).
-- Six Edge Functions (Deno/TypeScript), the only writers:
-  `rooms-create`, `rooms-join`, `rooms-leave`, `game-start` (deal),
-  `game-commit` (validate), `game-draw`.
+- Nine Edge Functions (Deno/TypeScript): `rooms-create`, `rooms-join`,
+  `rooms-leave`, `game-start` (deal), `game-commit` (validate), `game-draw`,
+  `rooms-list` (lobby), `rooms-state` (polling read), `rooms-cleanup`.
+  All but the two reads are the only writers.
 - Reads: room/game rows directly (pollable) plus Realtime subscription for
   live updates. Clients never write game state; RLS reflects that.
 - Shared logic, not forked: functions import `src/game/rules.ts`
@@ -59,7 +61,7 @@ Room codes keep today's 5-letter shape (`randomCode` alphabet).
 
 ## Deployment (automatic)
 
-- `supabase/` holds `config.toml`, SQL migrations, and the six functions.
+- `supabase/` holds `config.toml`, SQL migrations, and the nine functions.
 - One command deploys everything to the linked project:
   `supabase db push` + `supabase functions deploy` (wrapped as
   `npm run server:deploy`).
@@ -75,7 +77,7 @@ Room codes keep today's 5-letter shape (`randomCode` alphabet).
 - Handler tests per function with a mocked Supabase client: happy paths plus
   full-room, unknown-code, wrong-turn, and validation-failure errors.
 - Gates: `npm test`, `tsc --noEmit`, migration dry-run, local function smoke
-  (valid + invalid payloads for all six functions).
+  (valid + invalid payloads for all nine functions).
 
 ## Non-goals and open questions
 

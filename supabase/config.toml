@@ -33,3 +33,7 @@ verify_jwt = false
 [functions.rooms-cleanup]
 enabled = true
 verify_jwt = false
+
+[functions.rooms-state]
+enabled = true
+verify_jwt = false

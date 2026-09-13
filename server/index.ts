@@ -17,6 +17,7 @@ export {
   handleRoomsJoin,
   handleRoomsLeave,
   handleRoomsList,
+  handleRoomsState,
   type ApiResult,
   type CallDeps,
 } from './handlers.ts';

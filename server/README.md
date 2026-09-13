@@ -11,8 +11,8 @@ is unchanged and still plays P2P.
   under Node/Vitest and Deno. `fake-db.ts` is the in-memory `Db` for tests.
 - `supabase/migrations/` — `rooms`, `seats`, `games` tables. RLS enabled
   with no permissive policies: only Edge Functions (service role) touch them.
-- `supabase/functions/<name>/index.ts` — eight thin Deno wrappers (room
-  CRUD + list, game start/commit/draw, scheduled cleanup) around
+- `supabase/functions/<name>/index.ts` — nine thin Deno wrappers (room
+  CRUD + list + state, game start/commit/draw, scheduled cleanup) around
   `server/handlers.ts`. Fully covered by `server/handlers.test.ts`.
 - `supabase/functions/_shared/cors.ts`, `supabase-db.ts` — handwritten
   Deno-only helpers (preserved by sync).

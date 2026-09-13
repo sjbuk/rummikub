@@ -1,10 +1,11 @@
 import { commitTurn, drawTile, startGame } from './game.ts';
-import { createRoom, joinRoom, leaveRoom, listRooms } from './rooms.ts';
+import { createRoom, joinRoom, leaveRoom, listRooms, projectState } from './rooms.ts';
 import {
   EMPTY_ROOM_TTL_MS,
   ROOM_MAX_IDLE_MS,
   type Db,
   ServerError,
+  normalizeCode,
 } from './types.ts';
 
 export interface ApiResult {
@@ -99,6 +100,22 @@ export async function handleGameCommit(db: Db, input: unknown, deps: CallDeps = 
 export async function handleGameDraw(db: Db, input: unknown, deps: CallDeps = {}): Promise<ApiResult> {
   try {
     return ok(await drawTile(db, codeOf(input), seatOf(input), deps.now ?? Date.now()));
+  } catch (e) {
+    return err(e);
+  }
+}
+
+/** POST /rooms-state { code, seat } -> 200 PublicState (polling read path). */
+export async function handleRoomsState(db: Db, input: unknown): Promise<ApiResult> {
+  try {
+    const code = normalizeCode(codeOf(input));
+    const seat = seatOf(input);
+    if (!Number.isInteger(seat)) throw new ServerError(400, 'bad_seat', 'Seat must be an integer.');
+    const room = await db.getRoom(code);
+    if (!room) throw new ServerError(404, 'no_room', 'No room with that code.');
+    const row = await db.getSeat(code, seat as number);
+    if (!row) throw new ServerError(404, 'no_seat', 'No such seat in that room.');
+    return ok(await projectState(db, room, seat as number));
   } catch (e) {
     return err(e);
   }
