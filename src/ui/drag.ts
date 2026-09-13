@@ -22,6 +22,17 @@ export interface DragDest {
   index: number;
 }
 
+/**
+ * Backstop against iPad double-tap-to-zoom for the two-tap set grab.
+ * Safari fires `dblclick` on double-tap and can smart-zoom from it on paths
+ * `touch-action` doesn't cover (older iOS ignores `touch-action` entirely,
+ * and the grids re-render between the two taps). Cancelling `dblclick`
+ * suppresses that zoom; single taps and clicks are unaffected.
+ */
+export function suppressDoubleTapZoom(target: Pick<HTMLElement, 'addEventListener'>): void {
+  target.addEventListener('dblclick', (e) => e.preventDefault(), { passive: false });
+}
+
 export interface TileDragHooks {
   /** Scope in which `.drop-target` highlights are cleared. */
   root: HTMLElement;
