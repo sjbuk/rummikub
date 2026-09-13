@@ -209,6 +209,13 @@ button:not(:disabled):hover { filter: brightness(1.06); }
   .toolbar.vertical { flex-direction: row; width: 100%; }
   .toolbar.vertical button { width: auto; flex: 1; }
 }
+/* Suppress iPad double-tap-to-zoom while keeping pinch zoom and scrolling.
+   `touch-action: manipulation` is the standards-based switch — a
+   `maximum-scale=1 / user-scalable=no` viewport would harm accessibility and
+   iOS ignores it anyway. It lives on #app because both grids re-render on
+   every tap, so per-tile rules alone don't span the two taps of a set grab.
+   Drag tiles keep `none` below so finger-drags move tiles instead of scrolling. */
+#app, .cell, button { touch-action: manipulation; }
 /* All tiles own their touch gestures so finger-drags move instead of scrolling.
    One Pointer Events controller serves both grids on every pointer type. */
 .grid-board .tile { touch-action: none; -webkit-touch-callout: none; }
