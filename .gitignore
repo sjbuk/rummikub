@@ -44,3 +44,6 @@ Thumbs.db
 # Generated Edge Function bundle (rebuilt by npm run server:sync-shared)
 supabase/functions/_shared/server/
 supabase/functions/_shared/src/
+
+# Supabase CLI link state (may contain database credentials)
+supabase/.temp/
