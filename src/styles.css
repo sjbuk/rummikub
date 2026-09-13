@@ -23,7 +23,7 @@ body {
   background-attachment: fixed;
 }
 
-#app { max-width: 1100px; margin: 0 auto; padding: 20px 16px 120px; }
+#app { max-width: 1280px; margin: 0 auto; padding: 20px 16px 24px; }
 
 .topbar {
   display: flex; align-items: center; justify-content: space-between;
@@ -31,6 +31,9 @@ body {
 }
 .brand { font-size: 26px; font-weight: 800; letter-spacing: 0.5px; }
 .brand small { display: block; font-size: 12px; font-weight: 500; opacity: 0.75; }
+/* Game header: room code sits on the same line as the title. */
+.brand.inline small { display: inline; margin-left: 10px; font-size: 14px; }
+.brand.inline .code { font-size: 16px; letter-spacing: 2px; }
 
 .card {
   background: var(--panel);
@@ -99,10 +102,13 @@ button:not(:disabled):hover { filter: brightness(1.06); }
   border: 0;
 }
 
+/* Grids fill their container: each column takes an equal share and cells keep
+   the classic 46:62 tile ratio, so the wider 18-column board and 16-column
+   staging grid use the available width instead of leaving dead space. */
 .grid-board {
   display: grid;
-  grid-template-columns: repeat(var(--cols, 15), 46px);
-  grid-auto-rows: 62px;
+  grid-template-columns: repeat(var(--cols, 18), minmax(0, 1fr));
+  grid-auto-rows: auto;
   gap: 6px;
   margin: 12px 0;
   padding: 10px;
@@ -112,7 +118,8 @@ button:not(:disabled):hover { filter: brightness(1.06); }
   border-radius: 12px;
 }
 .cell {
-  width: 46px; height: 62px;
+  width: auto; height: auto;
+  aspect-ratio: 46 / 62;
   border-radius: 8px;
 }
 .cell.empty {
@@ -124,18 +131,31 @@ button:not(:disabled):hover { filter: brightness(1.06); }
 .cell.drop-target { outline: 2px solid var(--gold); }
 .cell.invalid { background: rgba(214, 48, 49, 0.28); border: 1px solid rgba(214, 48, 49, 0.8); }
 .cell .tile { width: 100%; height: 100%; }
-@media (max-width: 760px) {
-  .grid-board { grid-template-columns: repeat(var(--cols, 15), 32px); grid-auto-rows: 46px; gap: 4px; }
-  .cell { width: 32px; height: 46px; border-radius: 6px; }
-  .tile { font-size: 15px; }
+/* Tablet: tighten the chrome so the full grid fits without sideways scrolling. */
+@media (max-width: 1020px) {
+  #app { padding: 16px 12px 24px; }
+  .card { padding: 14px; }
+  .grid-board { gap: 5px; padding: 8px; }
+}
+/* iPad portrait and smaller: tile type steps down slightly with the tiles. */
+@media (max-width: 860px) {
+  .grid-board { gap: 4px; }
+  .cell .tile { font-size: 15px; }
+}
+/* Phones: columns would shrink past usability, so fall back to fixed small
+   tiles with sideways scrolling instead. */
+@media (max-width: 700px) {
+  .grid-board { grid-template-columns: repeat(var(--cols, 18), 32px); grid-auto-rows: 44px; gap: 4px; }
+  .cell { width: 32px; height: 44px; aspect-ratio: auto; border-radius: 6px; }
+  .cell .tile { font-size: 14px; }
 }
 
 .tile {
-  width: 46px; height: 62px;
+  width: 100%; height: 100%;
   border-radius: 8px;
   background: var(--tile-bg);
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  font-weight: 800; font-size: 20px; line-height: 1;
+  font-weight: 800; font-size: clamp(14px, 1.6vw, 20px); line-height: 1;
   color: var(--black);
   cursor: pointer;
   user-select: none;
@@ -169,16 +189,22 @@ button:not(:disabled):hover { filter: brightness(1.06); }
   padding: 12px;
   margin-top: 16px;
 }
+/* Game screen: full-viewport column so the board takes the space above the
+   rack, and the rack docks to the viewport bottom on short content while
+   staying stuck there on scroll (sticky bottom). */
+.game { display: flex; flex-direction: column; min-height: calc(100vh - 44px); min-height: calc(100dvh - 44px); }
+.game .rack { margin-top: auto; }
 .rack h3 { margin: 0 0 8px; font-size: 14px; opacity: 0.8; }
 /* Gold frame on the rack while it's your turn. */
 .rack.my-turn { border-color: var(--gold); box-shadow: 0 0 0 1px var(--gold), 0 8px 24px rgba(0, 0, 0, 0.35); }
-.rack-hint { font-size: 12px; margin: 0 0 8px; }
 /* Staging grid beside its action column. */
 .rack-body { display: flex; gap: 12px; align-items: flex-start; }
 .rack-body .rack-grid { flex: 1; min-width: 0; margin: 0; }
 .toolbar.vertical { flex-direction: column; align-items: stretch; margin-top: 0; flex: 0 0 auto; }
 .toolbar.vertical button { width: 100%; white-space: nowrap; }
-@media (max-width: 560px) {
+/* Below landscape-tablet widths the side action column would squeeze the
+   staging tiles, so actions move underneath and the grid takes full width. */
+@media (max-width: 860px) {
   .rack-body { flex-direction: column; }
   .toolbar.vertical { flex-direction: row; width: 100%; }
   .toolbar.vertical button { width: auto; flex: 1; }
@@ -227,8 +253,9 @@ button:not(:disabled):hover { filter: brightness(1.06); }
 .open-row { display: flex; gap: 10px; align-items: center; }
 .open-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .message { min-height: 22px; margin-top: 10px; font-size: 14px; }
-.top-message { margin: 0 0 12px; }
-.top-message:empty { display: none; }
+/* Game feedback lives inside the status bar as a full-width final row. */
+.status-message { flex-basis: 100%; margin: 2px 0 0; }
+.status-message:empty { display: none; }
 .message.error { color: #ff9d9d; }
 .message.ok { color: #9df0b6; }
 .code { font-size: 28px; font-weight: 800; letter-spacing: 4px; color: var(--gold); }

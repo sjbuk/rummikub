@@ -48,7 +48,7 @@ interface UiState {
   isPrivate: boolean;
   /** Open public games seen via lobby announcements. */
   openGames: OpenGame[];
-  /** Staging grid (2×15 slots): the player's tiles, arranged freely between rounds. */
+  /** Staging grid (2×16 slots): the player's tiles, arranged freely between rounds. */
   rack: Grid;
   /** Rack arrangement when this turn started — Revert restores it alongside the board. */
   turnStartRack: Grid | null;
@@ -891,7 +891,7 @@ export function createApp() {
     const m = root.querySelector('[data-msg]');
     if (m) {
       m.textContent = state.message;
-      m.className = `message top-message ${state.messageKind}`.trim();
+      m.className = `message status-message ${state.messageKind}`.trim();
     }
   }
 
@@ -990,10 +990,10 @@ export function createApp() {
     root.append(wrap);
   }
   function renderGame() {
-    const wrap = el('div');
+    const wrap = el('div', 'game');
     const bar = el('div', 'topbar');
-    const brand = el('div', 'brand');
-    brand.innerHTML = `Rummikub P2P<small>room <span class="code">${state.code}</span></small>`;
+    const brand = el('div', 'brand inline');
+    brand.innerHTML = `Rummikub P2P <small>room <span class="code">${state.code}</span></small>`;
     const leave = el('button', 'secondary', 'Leave') as HTMLButtonElement;
     leave.onclick = () => {
       net?.leave();
@@ -1018,6 +1018,9 @@ export function createApp() {
     const soundBtn = el('button', 'secondary sound-toggle', state.soundOn ? 'Sound: on' : 'Sound: off') as HTMLButtonElement;
     soundBtn.title = 'Toggle the turn alert sound';
     soundBtn.onclick = toggleSound;
+    // Game feedback (waiting, dealt, errors) lives in the status bar itself.
+    const statusMsg = el('div', 'message status-message');
+    statusMsg.setAttribute('data-msg', '1');
     status.append(
       turnPill,
       el('div', 'pill', `Pool: ${state.role === 'host' ? state.pool.length : state.poolCount}`),
@@ -1025,6 +1028,7 @@ export function createApp() {
       el('div', 'pill', state.melded ? 'Melded ✓' : 'Need 30+ meld'),
       el('div', 'pill', state.connected ? '● live' : '○ waiting…'),
       soundBtn,
+      statusMsg,
     );
     wrap.append(status);
 
@@ -1034,10 +1038,6 @@ export function createApp() {
       live.setAttribute('role', 'status');
       wrap.append(live);
     }
-
-    const topMsg = el('div', 'message top-message');
-    topMsg.setAttribute('data-msg', '1');
-    wrap.append(topMsg);
 
     if (myTurn()) ensureDraft();
     const grid = shownGrid();
@@ -1088,10 +1088,6 @@ export function createApp() {
 
     const rack = el('div', `rack${myTurn() ? ' my-turn' : ''}`);
     rack.append(el('h3', '', `${state.name || 'You'} — staging (${myTiles().length})`));
-    rack.append(el('p', 'muted rack-hint',
-      state.sortMode === 'manual'
-        ? 'Manual order — press and drag any tile to move just it; double-tap a run to grab it, then drag the whole group (×N badge). Runs move to the board and back. New tiles join the first free slot.'
-        : 'Tip: press and drag a staging tile onto another slot to arrange it yourself (switches to manual). Double-tap a run to drag it whole.'));
     const rackBody = el('div', 'rack-body');
     const rackGridEl = el('div', 'grid-board rack-grid');
     rackGridEl.style.setProperty('--cols', String(RACK_COLS));

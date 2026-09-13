@@ -140,7 +140,7 @@ describe('slot grid', () => {
 });
 
 describe('staging grid', () => {
-  it('packs tiles into a 2x15 grid and reads them back in slot order', () => {
+  it('packs tiles into a 2x16 grid and reads them back in slot order', () => {
     const tiles = [num(1, 'a'), blue(2, 'b'), num(3, 'c')];
     const rack = rackFromTiles(tiles);
     expect(rack).toHaveLength(RACK_SIZE);

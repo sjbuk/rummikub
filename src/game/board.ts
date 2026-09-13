@@ -1,12 +1,12 @@
 import type { BoardSet, Tile } from './types';
 import { validateSet } from './rules';
 
-export const GRID_COLS = 15;
+export const GRID_COLS = 18;
 export const GRID_ROWS = 6;
 export const GRID_SIZE = GRID_COLS * GRID_ROWS;
 
 /** Player staging area: a smaller 2-row sibling of the main board grid. */
-export const RACK_COLS = 15;
+export const RACK_COLS = 16;
 export const RACK_ROWS = 2;
 export const RACK_SIZE = RACK_COLS * RACK_ROWS;
 
@@ -103,7 +103,7 @@ export function layoutSetsToGrid(sets: BoardSet[]): Grid {
       r++;
       c = 0;
     }
-    if (r >= GRID_ROWS) break; // overflow guard: 90 slots far exceeds 2-player needs
+    if (r >= GRID_ROWS) break; // overflow guard: 108 slots far exceeds 2-player needs
     for (const t of set) {
       grid[r * GRID_COLS + c] = t;
       c++;
