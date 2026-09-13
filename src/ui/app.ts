@@ -921,7 +921,6 @@ export function createApp() {
       startAnnounce();
       history.replaceState(null, '', `#room=${state.code}`);
       render();
-      say(state.isPrivate ? 'Share the code — waiting for opponent…' : 'Listed as an open game — waiting for opponent…');
     };
     const privLabel = document.createElement('label');
     privLabel.className = 'check';
@@ -1013,8 +1012,9 @@ export function createApp() {
     const status = el('div', `statusbar${myTurn() && !state.winner ? ' my-turn' : ''}`);
     const turnPill = el('div', `pill ${myTurn() ? 'turn' : ''}`,
       state.winner ? `Winner: ${state.winner === state.role ? state.name || 'You' : state.peerName}`
-        : myTurn() ? 'Your turn — arrange, then End Turn'
-          : state.peerView ? `${state.peerName} is arranging…` : `${state.peerName}'s turn`);
+        : !state.dealt ? 'Waiting for opponent…'
+          : myTurn() ? 'Your turn — arrange, then End Turn'
+            : state.peerView ? `${state.peerName} is arranging…` : `${state.peerName}'s turn`);
     const soundBtn = el('button', 'secondary sound-toggle', state.soundOn ? 'Sound: on' : 'Sound: off') as HTMLButtonElement;
     soundBtn.title = 'Toggle the turn alert sound';
     soundBtn.onclick = toggleSound;
@@ -1083,7 +1083,6 @@ export function createApp() {
       boardEl.append(cellEl);
     }
     boardCard.append(boardEl);
-    boardCard.append(el('p', 'muted', 'Press and drag a tile to move it (drop on another tile to swap) — same gesture with mouse, touch, or pen. Tap a tile twice to grab its whole set, then tap or drag it to a destination; a set needs a free stretch in one row. Sets move both ways between board and staging. Your opponent watches live as you arrange.'));
     wrap.append(boardCard);
 
     const rack = el('div', `rack${myTurn() ? ' my-turn' : ''}`);
