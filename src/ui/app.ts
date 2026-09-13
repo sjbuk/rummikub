@@ -2,16 +2,24 @@ import { buildDeck, shuffle, validateTurn, HAND_SIZE } from '../game/rules';
 import {
   GRID_COLS,
   GRID_ROWS,
+  RACK_COLS,
+  deriveRackSets,
   deriveSets,
   emptyGrid,
+  emptyRack,
   findInvalidCells,
-  insertRackTile,
+  firstEmptyRackSlot,
+  moveBoardSetToRack,
+  moveRackSetToBoard,
   moveSet,
   moveTile,
+  rackFromTiles,
+  rackTiles,
   sortTiles,
   type Grid,
   type SortMode,
 } from '../game/board';
+import { attachTileDrag, type DragDest, type DragPayload, type TileDragHooks } from './drag';
 import type { Tile } from '../game/types';
 import { makeLobbyRoom, makeRoom, randomCode, type LobbyHandle, type NetHandle, type NetMessage } from '../net/p2p';
 import {
@@ -25,6 +33,7 @@ import {
 type Role = 'host' | 'guest';
 type Selection =
   | { area: 'rack'; index: number }
+  | { area: 'rackSet'; cells: number[] }
   | { area: 'cell'; cell: number }
   | { area: 'set'; cells: number[] }
   | null;
@@ -39,7 +48,10 @@ interface UiState {
   isPrivate: boolean;
   /** Open public games seen via lobby announcements. */
   openGames: OpenGame[];
-  hand: Tile[];
+  /** Staging grid (2×15 slots): the player's tiles, arranged freely between rounds. */
+  rack: Grid;
+  /** Rack arrangement when this turn started — Revert restores it alongside the board. */
+  turnStartRack: Grid | null;
   board: Grid;
   draft: Grid | null;
   /** Live view of the opponent's in-progress turn. Cleared on commit/draw. */
@@ -85,7 +97,8 @@ export function createApp() {
     peerName: 'Opponent',
     isPrivate: false,
     openGames: [],
-    hand: [],
+    rack: emptyRack(),
+    turnStartRack: null,
     board: emptyGrid(),
     draft: null,
     peerView: null,
@@ -120,8 +133,6 @@ export function createApp() {
   };
 
   // ---------- turn alerts: banner, tab title, chime ----------
-  /** Set after a touch drag so the trailing click doesn't re-select the tile. */
-  let suppressTouchClick = false;
   let audioCtx: AudioContext | null = null;
   /** Turn state on the previous render — a false→true edge fires the alert. */
   let wasMyTurn = false;
@@ -184,10 +195,16 @@ export function createApp() {
     render();
   }
 
+  /** Snapshot the staging grid so Revert can restore it with the board. */
+  function snapshotTurnStart() {
+    state.turnStartRack = [...state.rack];
+  }
+
   /** Fire the turn alert once per false→true edge while a game is live. */
   function noteTurn() {
     const mine = myTurn();
     const becameMine = mine && !wasMyTurn && state.screen === 'game' && state.dealt && !state.winner;
+    if (becameMine) snapshotTurnStart();
     wasMyTurn = mine;
     document.title = mine && state.screen === 'game' && !state.winner
       ? 'Your turn! — Rummikub P2P'
@@ -335,9 +352,10 @@ export function createApp() {
     const hostHand = deck.slice(0, HAND_SIZE);
     const guestHand = deck.slice(HAND_SIZE, HAND_SIZE * 2);
     state.pool = deck.slice(HAND_SIZE * 2);
-    state.hand = state.role === 'host' ? hostHand : guestHand;
     state.sortMode = 'color';
-    sortHand();
+    state.rack = rackFromTiles(sortTiles(state.role === 'host' ? hostHand : guestHand, 'color'));
+    state.turnStartRack = null;
+    wasMyTurn = false;
     state.board = emptyGrid();
     state.draft = null;
     state.peerView = null;
@@ -373,9 +391,10 @@ export function createApp() {
         break;
       case 'deal':
         if (msg.to === state.role) {
-          state.hand = msg.hand;
           state.sortMode = 'color';
-          sortHand();
+          state.rack = rackFromTiles(sortTiles(msg.hand, 'color'));
+          state.turnStartRack = null;
+          wasMyTurn = false;
           state.poolCount = msg.poolCount;
           state.board = msg.board;
           state.draft = null;
@@ -427,7 +446,7 @@ export function createApp() {
         break;
       case 'drawGrant':
         if (msg.to === state.role) {
-          state.hand.push(msg.tile);
+          state.rack[firstEmptyRackSlot(state.rack)] = msg.tile;
           state.justDrewId = msg.tile.id;
           sortHand();
           state.poolCount = msg.poolCount;
@@ -452,7 +471,7 @@ export function createApp() {
   }
 
   function broadcastDrawBoard() {
-    net?.send({ t: 'drawBoard', by: state.role, handCount: state.hand.length, poolCount: state.poolCount, turn: state.turn });
+    net?.send({ t: 'drawBoard', by: state.role, handCount: rackTiles(state.rack).length, poolCount: state.poolCount, turn: state.turn });
   }
 
   // ---------- turn actions ----------
@@ -473,10 +492,22 @@ export function createApp() {
     return a !== b;
   }
 
-  /** Sorts the rack in the current mode; the button label always names this same mode. */
+  /** Tiles currently staged (slot order, gaps skipped). */
+  const myTiles = (): Tile[] => rackTiles(state.rack);
+
+  /** Sorts the staging grid in the current mode; the button label always names this same mode. */
   function sortHand() {
-    // Manual keeps the player's arrangement; drawn tiles were pushed to the right end.
-    state.hand = sortTiles(state.hand, state.sortMode);
+    // Manual keeps the player's arrangement; drawn tiles stay in their free slot.
+    if (state.sortMode === 'manual') return;
+    state.rack = rackFromTiles(sortTiles(myTiles(), state.sortMode));
+  }
+
+  /** A hand-arranged rack is manual from here on — auto-sort would undo it. */
+  function markManual() {
+    if (state.sortMode !== 'manual') {
+      state.sortMode = 'manual';
+      say('Manual staging order — your arrangement is kept; new tiles join the first free slot.');
+    }
   }
 
   const SORT_LABEL: Record<SortMode, string> = {
@@ -488,25 +519,23 @@ export function createApp() {
   function cycleSortMode() {
     state.sortMode = state.sortMode === 'color' ? 'number' : state.sortMode === 'number' ? 'manual' : 'color';
     sortHand();
-    if (state.sortMode === 'manual') say('Manual rack order — drag tiles to rearrange; new tiles join the right end.');
+    if (state.sortMode === 'manual') say('Manual staging order — drag tiles to rearrange; new tiles join the first free slot.');
     render();
   }
 
-  /**
-   * Drop the rack tile at `from` into the `gap` between tiles (0..hand.length),
-   * keeping the player's manual order. A drop that changes nothing is a no-op.
-   */
-  function insertRack(from: number, gap: number) {
-    const next = insertRackTile(state.hand, from, gap);
-    const same = next.length === state.hand.length && next.every((t, i) => t.id === state.hand[i].id);
-    if (same) return;
-    state.hand = next;
+  /** Swap two staging slots (moving into an empty one). Works between rounds too. */
+  function moveRack(from: number, to: number) {
+    if (from === to || !state.rack[from]) return;
+    state.rack = moveTile(state.rack, from, to);
     state.selection = null;
-    // A hand-arranged rack is manual from here on — auto-sort would undo it.
-    if (state.sortMode !== 'manual') {
-      state.sortMode = 'manual';
-      say('Manual rack order — your arrangement is kept; new tiles join the right end.');
-    }
+    markManual();
+  }
+
+  /** Staging-grid arrangement vs the turn-start snapshot. */
+  function rackDiffers(): boolean {
+    if (!state.turnStartRack) return false;
+    if (state.turnStartRack.length !== state.rack.length) return true;
+    return state.turnStartRack.some((t, i) => (t?.id ?? null) !== (state.rack[i]?.id ?? null));
   }
 
   function doDraw() {
@@ -521,7 +550,7 @@ export function createApp() {
         say('Pool is empty.', 'error');
         return;
       }
-      state.hand.push(tile);
+      state.rack[firstEmptyRackSlot(state.rack)] = tile;
       state.justDrewId = tile.id;
       sortHand();
       state.poolCount = state.pool.length;
@@ -557,14 +586,15 @@ export function createApp() {
       return;
     }
     const placedSet = new Set(placedIds);
-    state.hand = state.hand.filter((t) => !placedSet.has(t.id));
-    if (state.justDrewId && !state.hand.some((t) => t.id === state.justDrewId)) state.justDrewId = null;
+    // Played tiles already left the staging grid when placed; drop any stragglers.
+    state.rack = state.rack.map((t) => (t && placedSet.has(t.id) ? null : t));
+    if (state.justDrewId && placedSet.has(state.justDrewId)) state.justDrewId = null;
     // Commit the grid as arranged — positions are preserved for both players.
     state.board = [...grid];
     state.draft = null;
     state.melded = true;
     state.selection = null;
-    const won = state.hand.length === 0;
+    const won = myTiles().length === 0;
     const next: Role = state.role === 'host' ? 'guest' : 'host';
     state.turn = won ? state.role : next;
     if (won) state.winner = state.role;
@@ -573,7 +603,7 @@ export function createApp() {
       board: [...grid],
       by: state.role,
       melded: true,
-      handCount: state.hand.length,
+      handCount: myTiles().length,
       poolCount: state.poolCount,
       turn: state.turn,
       ...(won ? { winnerId: state.role } : {}),
@@ -583,16 +613,13 @@ export function createApp() {
   }
 
   function doRevert() {
-    const beforeIds = committedIds();
-    for (const t of state.draft ?? []) {
-      if (t && !beforeIds.has(t.id)) state.hand.push(t);
-    }
-    sortHand();
+    // Restore both grids to the turn start — no sorting, the snapshot keeps the prep.
+    if (state.turnStartRack) state.rack = [...state.turnStartRack];
     state.draft = null;
     state.selection = null;
     // Spectator sees the reset too.
     if (myTurn()) net?.send({ t: 'draft', board: [...state.board], by: state.role });
-    say('Board reverted.');
+    say('Board and staging area reverted.');
     render();
   }
   // ---------- selection & placement on the slot grid ----------
@@ -603,17 +630,35 @@ export function createApp() {
     return null;
   }
 
-  /** Click (or drop) on a grid cell with the current selection. */
+  /** Click (or drop) on a board cell with the current selection. */
   function handleCellTarget(cell: number) {
     const s = state.selection;
-    if (!s || !myTurn()) return;
+    if (!s) return;
+    if (!myTurn()) {
+      state.selection = null;
+      say('Wait for your turn — stage tiles now, and play them when it starts.', 'error');
+      render();
+      return;
+    }
     const draft = ensureDraft();
     if (s.area === 'rack') {
-      const [t] = state.hand.splice(s.index, 1);
-      if (!t) return;
+      const t = state.rack[s.index];
+      if (!t) {
+        state.selection = null;
+        render();
+        return;
+      }
       const occ = draft[cell];
+      state.rack[s.index] = occ ?? null;
       draft[cell] = t;
-      if (occ) state.hand.splice(s.index, 0, occ); // swap with occupant
+    } else if (s.area === 'rackSet') {
+      const moved = moveRackSetToBoard(state.rack, draft, s.cells, cell);
+      if (!moved) {
+        say("That set doesn't fit there — it needs a free stretch in one row.", 'error');
+        return;
+      }
+      state.rack = moved.rack;
+      state.draft = moved.board;
     } else if (s.area === 'cell') {
       state.draft = moveTile(draft, s.cell, cell);
     } else {
@@ -629,16 +674,92 @@ export function createApp() {
     render();
   }
 
+  /** Click (or drop) on a staging slot with the current selection. */
+  function handleRackTarget(slot: number) {
+    const s = state.selection;
+    if (!s) return;
+    if (s.area === 'rack' || s.area === 'rackSet') {
+      // Staging-to-staging is always allowed: prep freely, even between rounds.
+      if (s.area === 'rack') moveRack(s.index, slot);
+      else {
+        const moved = moveSet(state.rack, s.cells, slot, RACK_COLS);
+        if (!moved) {
+          say("That set doesn't fit there — it needs a free stretch in one row.", 'error');
+          return;
+        }
+        state.rack = moved;
+        state.selection = null;
+        markManual();
+      }
+      render();
+      return;
+    }
+    if (!myTurn()) {
+      // Between rounds a board selection just becomes a staging selection.
+      state.selection = state.rack[slot] ? { area: 'rack', index: slot } : null;
+      render();
+      return;
+    }
+    if (s.area === 'cell') {
+      // Return a rack-origin tile from the board to the staging grid (swap).
+      const beforeIds = committedIds();
+      const draft = ensureDraft();
+      const tile = draft[s.cell];
+      if (!tile || beforeIds.has(tile.id)) {
+        say('Committed board tiles must stay on the board — rearrange them into valid sets.', 'error');
+        return;
+      }
+      const occ = state.rack[slot];
+      draft[s.cell] = occ;
+      state.rack[slot] = tile;
+      state.selection = null;
+      scheduleDraftBroadcast();
+      render();
+      return;
+    }
+    // Board sets may return to staging exactly like staging sets go to the
+    // board — same "free stretch in one row" rule. Committed tiles stay put.
+    const draft = ensureDraft();
+    const tiles = s.cells.map((c) => draft[c]);
+    if (tiles.some((t) => !t)) {
+      state.selection = null;
+      render();
+      return;
+    }
+    const beforeIds = committedIds();
+    if (tiles.some((t) => t && beforeIds.has(t.id))) {
+      say('Committed board tiles must stay on the board — rearrange them into valid sets.', 'error');
+      return;
+    }
+    const moved = moveBoardSetToRack(draft, state.rack, s.cells, slot);
+    if (!moved) {
+      say("That set doesn't fit there — it needs a free stretch in one row.", 'error');
+      return;
+    }
+    state.draft = moved.board;
+    state.rack = moved.rack;
+    state.selection = null;
+    markManual();
+    scheduleDraftBroadcast();
+    render();
+  }
+
   // Tap timing for set grabs. A re-render on every tap breaks the browser's
   // native dblclick, so a quick second tap on the same tile grabs its set.
-  let lastTap = { cell: -1, time: 0 };
+  // One shared helper serves both grids: board taps key 'b<n>', staging 'r<n>'.
+  let lastTap = { key: '', time: 0 };
   const DOUBLE_TAP_MS = 450;
+
+  function isDoubleTap(key: string): boolean {
+    const now = Date.now();
+    const dbl = lastTap.key === key && now - lastTap.time < DOUBLE_TAP_MS;
+    lastTap = { key, time: now };
+    return dbl;
+  }
 
   function clickCell(cell: number) {
     if (!myTurn()) return;
-    const now = Date.now();
-    const quickSecondTap = lastTap.cell === cell && now - lastTap.time < DOUBLE_TAP_MS;
-    lastTap = { cell, time: now };
+    const quickSecondTap = isDoubleTap(`b${cell}`);
     const s = state.selection;
     if (s?.area === 'cell' && s.cell === cell && quickSecondTap && shownGrid()[cell]) {
       grabSet(cell);
@@ -662,40 +783,90 @@ export function createApp() {
     }
   }
 
-  function clickRackTile(i: number) {
+  function rackSetForCell(cell: number): number[] | null {
+    for (const d of deriveRackSets(state.rack)) {
+      if (d.cells.includes(cell)) return d.cells;
+    }
+    return null;
+  }
+
+  function grabRackSet(cell: number) {
+    const cells = rackSetForCell(cell);
+    if (cells && cells.length > 1) {
+      state.selection = { area: 'rackSet', cells };
+      say(myTurn()
+        ? 'Whole run grabbed — click a board cell to play it, or a staging slot to move it.'
+        : 'Whole run grabbed — arrange it in staging, or play it when your turn comes.');
+      render();
+    }
+  }
+
+  function clickRackSlot(i: number) {
+    const quickSecondTap = isDoubleTap(`r${i}`);
     const s = state.selection;
     if (s?.area === 'rack' && s.index === i) {
-      state.selection = null;
-      render();
-      return;
-    }
-    if (s?.area === 'cell' && myTurn()) {
-      // Return a rack-origin tile from the board to the rack.
-      const beforeIds = committedIds();
-      const tile = ensureDraft()[s.cell];
-      if (!tile || beforeIds.has(tile.id)) {
-        say('Committed board tiles must stay on the board — rearrange them into valid sets.', 'error');
+      // A quick second tap grabs the whole run, like the board's double-tap.
+      if (quickSecondTap && state.rack[i]) {
+        grabRackSet(i);
         return;
       }
-      ensureDraft()[s.cell] = null;
-      state.hand.splice(i, 0, tile);
       state.selection = null;
-      scheduleDraftBroadcast();
       render();
       return;
     }
-    if (s?.area === 'rack') {
-      // Tap two rack tiles to reorder — the selected tile takes the tapped tile's place.
-      insertRack(s.index, s.index < i ? i + 1 : i);
+    if (!s) {
+      if (!state.rack[i]) return;
+      state.selection = { area: 'rack', index: i };
       render();
       return;
     }
-    if (s?.area === 'set') {
-      say("Sets live on the board — click a board cell to place it, or pick a single tile.", 'error');
-      return;
+    handleRackTarget(i);
+  }
+
+  // ---------- unified press-drag-drop (one path for mouse, touch, pen) ----------
+  /**
+   * Resolve the drag payload at press time: pressing a tile of an already
+   * grabbed set carries the whole set, anything else carries one tile.
+   * Identical rule on both grids.
+   */
+  function boardPressPayload(cell: number): DragPayload {
+    const sel = state.selection;
+    if (sel?.area === 'set' && sel.cells.includes(cell)) return { area: 'board', cells: [...sel.cells] };
+    return { area: 'board', cells: [cell] };
+  }
+
+  function rackPressPayload(slot: number): DragPayload {
+    const sel = state.selection;
+    if (sel?.area === 'rackSet' && sel.cells.includes(slot)) return { area: 'rack', cells: [...sel.cells] };
+    return { area: 'rack', cells: [slot] };
+  }
+
+  /** A press released in place acts as a tap on the single pressed tile. */
+  function tapTile(payload: DragPayload) {
+    const at = payload.cells[0];
+    if (at === undefined) return;
+    if (payload.area === 'board') clickCell(at);
+    else clickRackSlot(at);
+  }
+
+  /**
+   * Commit a completed drag. Rebuilds the equivalent tap-tap selection from
+   * the press-time payload and runs it through the same target handlers, so
+   * drag-and-drop and click-click can never diverge.
+   */
+  function commitDragMove(payload: DragPayload, dest: DragDest) {
+    if (payload.cells.length === 0) return;
+    if (payload.area === 'rack') {
+      state.selection = payload.cells.length > 1
+        ? { area: 'rackSet', cells: [...payload.cells] }
+        : { area: 'rack', index: payload.cells[0] };
+    } else {
+      state.selection = payload.cells.length > 1
+        ? { area: 'set', cells: [...payload.cells] }
+        : { area: 'cell', cell: payload.cells[0] };
     }
-    state.selection = { area: 'rack', index: i };
-    render();
+    if (dest.area === 'board') handleCellTarget(dest.index);
+    else handleRackTarget(dest.index);
   }
 
   // ---------- rendering ----------
@@ -720,7 +891,7 @@ export function createApp() {
     const m = root.querySelector('[data-msg]');
     if (m) {
       m.textContent = state.message;
-      m.className = `message ${state.messageKind}`;
+      m.className = `message top-message ${state.messageKind}`.trim();
     }
   }
 
@@ -829,7 +1000,7 @@ export function createApp() {
       net = null;
       stopAnnounce();
       Object.assign(state, {
-        screen: 'lobby', hand: [], board: emptyGrid(), draft: null, peerView: null, pool: [],
+        screen: 'lobby', rack: emptyRack(), turnStartRack: null, board: emptyGrid(), draft: null, peerView: null, pool: [],
         winner: null, dealt: false, connected: false, message: '', justDrewId: null,
       } as Partial<UiState>);
       wasMyTurn = false;
@@ -839,7 +1010,7 @@ export function createApp() {
     bar.append(brand, leave);
     wrap.append(bar);
 
-    const status = el('div', 'statusbar');
+    const status = el('div', `statusbar${myTurn() && !state.winner ? ' my-turn' : ''}`);
     const turnPill = el('div', `pill ${myTurn() ? 'turn' : ''}`,
       state.winner ? `Winner: ${state.winner === state.role ? state.name || 'You' : state.peerName}`
         : myTurn() ? 'Your turn — arrange, then End Turn'
@@ -857,11 +1028,16 @@ export function createApp() {
     );
     wrap.append(status);
 
+    // Screen-reader turn announcement that takes up no space.
     if (myTurn() && !state.winner) {
-      const banner = el('div', 'turn-banner', 'Your turn — play tiles or draw a tile');
-      banner.setAttribute('role', 'status');
-      wrap.append(banner);
+      const live = el('div', 'sr-only', 'Your turn — play tiles or draw a tile');
+      live.setAttribute('role', 'status');
+      wrap.append(live);
     }
+
+    const topMsg = el('div', 'message top-message');
+    topMsg.setAttribute('data-msg', '1');
+    wrap.append(topMsg);
 
     if (myTurn()) ensureDraft();
     const grid = shownGrid();
@@ -869,10 +1045,24 @@ export function createApp() {
     deriveSets(grid).forEach((d, i) => d.cells.forEach((c) => setOfCell.set(c, i)));
     const invalid = findInvalidCells(grid);
 
+    // One drag controller for both grids (mouse, touch, pen). The grid
+    // elements are assigned as they are built; no pointer event can fire
+    // before this synchronous render returns.
+    let boardGridRef: HTMLElement | null = null;
+    let rackGridRef: HTMLElement | null = null;
+    const dragHooks: TileDragHooks = {
+      root: wrap,
+      get boardGrid() { return boardGridRef as HTMLElement; },
+      get rackGrid() { return rackGridRef as HTMLElement; },
+      onTap: (p) => tapTile(p),
+      onDrop: (p, d) => commitDragMove(p, d),
+    };
+
     const boardCard = el('div', 'card');
     boardCard.append(el('h2', '', 'Board'));
-    const boardEl = el('div', 'grid-board');
+    const boardEl = el('div', 'grid-board board-grid');
     boardEl.style.setProperty('--cols', String(GRID_COLS));
+    boardGridRef = boardEl;
     for (let cell = 0; cell < GRID_COLS * GRID_ROWS; cell++) {
       const tile = grid[cell];
       const cellEl = el('div', 'cell' + (tile ? '' : ' empty'));
@@ -885,252 +1075,55 @@ export function createApp() {
         (sel?.area === 'set' && sel.cells.includes(cell));
       if (tile) {
         const tEl = tileEl(tile, isSel ? 'selected' : '');
-        tEl.setAttribute('draggable', myTurn() ? 'true' : 'false');
-        tEl.onclick = () => clickCell(cell);
-        tEl.ondragstart = (e) => {
-          if (!myTurn()) { e.preventDefault(); return; }
-          const sel = state.selection;
-          // Dragging a tile of a grabbed set moves the whole set; otherwise just the tile.
-          if (sel?.area === 'set' && sel.cells.includes(cell)) {
-            e.dataTransfer?.setData('text/setmove', String(cell));
-          } else {
-            e.dataTransfer?.setData('text/cell', String(cell));
-          }
-        };
+        attachTileDrag(tEl, boardPressPayload(cell), dragHooks);
         cellEl.append(tEl);
       } else {
         cellEl.onclick = () => clickCell(cell);
       }
-      cellEl.ondragover = (e) => { e.preventDefault(); cellEl.classList.add('drop-target'); };
-      cellEl.ondragleave = () => cellEl.classList.remove('drop-target');
-      cellEl.ondrop = (e) => {
-        e.preventDefault();
-        cellEl.classList.remove('drop-target');
-        const mv = e.dataTransfer?.getData('text/setmove');
-        const c = e.dataTransfer?.getData('text/cell');
-        const r = e.dataTransfer?.getData('text/rack');
-        if (mv !== undefined && mv !== '') {
-          const cells = setForCell(ensureDraft(), Number(mv));
-          if (!cells) return;
-          if (cells.length <= 1) {
-            state.selection = { area: 'cell', cell: Number(mv) };
-          } else {
-            state.selection = { area: 'set', cells };
-          }
-        } else if (c !== undefined && c !== '') state.selection = { area: 'cell', cell: Number(c) };
-        else if (r !== undefined && r !== '') state.selection = { area: 'rack', index: Number(r) };
-        else return;
-        handleCellTarget(cell);
-      };
       boardEl.append(cellEl);
     }
     boardCard.append(boardEl);
-    boardCard.append(el('p', 'muted', 'Drag a tile to move it (drop on another tile to swap). Tap a tile twice to grab its whole set, then click or drag it to a destination cell — a set needs a free stretch in one row. Your opponent watches live as you arrange.'));
+    boardCard.append(el('p', 'muted', 'Press and drag a tile to move it (drop on another tile to swap) — same gesture with mouse, touch, or pen. Tap a tile twice to grab its whole set, then tap or drag it to a destination; a set needs a free stretch in one row. Sets move both ways between board and staging. Your opponent watches live as you arrange.'));
     wrap.append(boardCard);
 
     const rack = el('div', `rack${myTurn() ? ' my-turn' : ''}`);
-    const rackTiles = el('div', 'tiles');
-    const tileEls: HTMLElement[] = [];
-    const gapMarker = el('div', 'rack-gap');
-    const showGap = (gap: number) => {
-      rackTiles.insertBefore(gapMarker, tileEls[gap] ?? null);
-    };
-    const hideGap = () => gapMarker.remove();
-    const clearBoardDropTargets = () => {
-      boardEl.querySelectorAll('.drop-target').forEach((n) => n.classList.remove('drop-target'));
-    };
-
-    /**
-     * Gap (0..hand.length) between rack tiles nearest the pointer — a drop
-     * inserts there. Left half of a tile resolves before it, right half after.
-     */
-    function gapFromPoint(x: number, y: number): number {
-      if (tileEls.length === 0) return 0;
-      interface RowTile { idx: number; top: number; bottom: number; left: number; width: number }
-      const rows = new Map<number, RowTile[]>();
-      tileEls.forEach((node, idx) => {
-        const rect = node.getBoundingClientRect();
-        const key = Math.round(rect.top);
-        const row = rows.get(key) ?? [];
-        row.push({ idx, top: rect.top, bottom: rect.bottom, left: rect.left, width: rect.width });
-        rows.set(key, row);
-      });
-      let best: RowTile[] | null = null;
-      let bestDist = Infinity;
-      for (const row of rows.values()) {
-        const dist = y < row[0].top ? row[0].top - y : y > row[0].bottom ? y - row[0].bottom : 0;
-        if (dist < bestDist) { bestDist = dist; best = row; }
-      }
-      const row = (best ?? []).slice().sort((a, b) => a.idx - b.idx);
-      for (const entry of row) {
-        if (x < entry.left + entry.width / 2) return entry.idx;
-      }
-      return row.length === 0 ? tileEls.length : row[row.length - 1].idx + 1;
-    }
-
-    // Touch/pen rack dragging. iOS Safari has no HTML5 drag-and-drop, so touch
-    // uses pointer events; mouse keeps the native DnD path below. No render
-    // happens mid-drag, so these element references stay valid throughout.
-    interface RackTouchDrag {
-      pointerId: number;
-      from: number;
-      startX: number;
-      startY: number;
-      active: boolean;
-      dropKind: 'rack' | 'board' | null;
-      gap: number;
-      boardCell: number | null;
-      origin: HTMLElement;
-      clone: HTMLElement | null;
-    }
-    let touchDrag: RackTouchDrag | null = null;
-
-    function endTouchDragVisuals(td: RackTouchDrag) {
-      td.clone?.remove();
-      td.clone = null;
-      td.origin.classList.remove('dragging');
-      hideGap();
-      clearBoardDropTargets();
-    }
-
-    function updateTouchDrag(e: PointerEvent) {
-      const td = touchDrag;
-      if (!td || e.pointerId !== td.pointerId || !td.clone) return;
-      const size = td.origin.getBoundingClientRect();
-      // Float the clone above the fingertip so the gap marker stays visible.
-      td.clone.style.transform = `translate(${e.clientX - size.width / 2}px, ${e.clientY - size.height - 14}px)`;
-      const under = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
-      const boardCellEl = under?.closest?.('.grid-board .cell') as HTMLElement | null;
-      if (under && rackTiles.contains(under)) {
-        td.dropKind = 'rack';
-        td.boardCell = null;
-        td.gap = gapFromPoint(e.clientX, e.clientY);
-        clearBoardDropTargets();
-        showGap(td.gap);
-      } else if (boardCellEl && myTurn() && boardEl.contains(boardCellEl)) {
-        td.dropKind = 'board';
-        td.boardCell = [...boardEl.children].indexOf(boardCellEl);
-        hideGap();
-        clearBoardDropTargets();
-        boardCellEl.classList.add('drop-target');
-      } else {
-        td.dropKind = null;
-        td.boardCell = null;
-        hideGap();
-        clearBoardDropTargets();
-      }
-    }
-
-    state.hand.forEach((t, i) => {
-      const sel = state.selection?.area === 'rack' && state.selection.index === i;
-      const isNew = state.justDrewId !== null && t.id === state.justDrewId;
-      const tEl = tileEl(t, `${sel ? 'selected' : ''} ${isNew ? 'just-drew' : ''}`.trim());
-      if (isNew) tEl.title = 'Just drawn';
-      tEl.setAttribute('draggable', 'true');
-      tEl.onclick = () => {
-        // A touch drag ends with a click on the dragged tile — swallow it.
-        if (suppressTouchClick) { suppressTouchClick = false; return; }
-        clickRackTile(i);
-      };
-      tEl.ondragstart = (e) => {
-        e.dataTransfer?.setData('text/rack', String(i));
-        if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
-      };
-      tEl.ondragend = () => hideGap();
-      tEl.onpointerdown = (e) => {
-        if (e.pointerType === 'mouse') return;
-        touchDrag = {
-          pointerId: e.pointerId, from: i, startX: e.clientX, startY: e.clientY,
-          active: false, dropKind: null, gap: i, boardCell: null, origin: tEl, clone: null,
-        };
-      };
-      tEl.onpointermove = (e) => {
-        const td = touchDrag;
-        if (!td || e.pointerId !== td.pointerId) return;
-        if (!td.active) {
-          // Small slop so plain taps still click instead of dragging.
-          if (Math.hypot(e.clientX - td.startX, e.clientY - td.startY) < 10) return;
-          td.active = true;
-          try { td.origin.setPointerCapture(td.pointerId); } catch { /* drag continues without capture */ }
-          const r = td.origin.getBoundingClientRect();
-          const clone = td.origin.cloneNode(true) as HTMLElement;
-          clone.classList.add('drag-clone');
-          clone.classList.remove('selected', 'just-drew', 'dragging');
-          clone.style.width = `${r.width}px`;
-          clone.style.height = `${r.height}px`;
-          document.body.append(clone);
-          td.clone = clone;
-          td.origin.classList.add('dragging');
-        }
-        updateTouchDrag(e);
-      };
-      tEl.onpointerup = (e) => {
-        const td = touchDrag;
-        if (!td || e.pointerId !== td.pointerId) return;
-        touchDrag = null;
-        if (!td.active) return; // plain tap — the click handler takes it
-        suppressTouchClick = true;
-        endTouchDragVisuals(td);
-        if (td.dropKind === 'board' && td.boardCell !== null && myTurn()) {
-          state.selection = { area: 'rack', index: td.from };
-          handleCellTarget(td.boardCell);
-        } else if (td.dropKind === 'rack') {
-          insertRack(td.from, td.gap);
-          render();
-        }
-        // Released anywhere else: the tile snaps back, nothing changes.
-      };
-      tEl.onpointercancel = (e) => {
-        const td = touchDrag;
-        if (!td || e.pointerId !== td.pointerId) return;
-        touchDrag = null;
-        if (td.active) endTouchDragVisuals(td);
-      };
-      tileEls.push(tEl);
-      rackTiles.append(tEl);
-    });
-    rackTiles.onclick = (e) => {
-      if ((e.target as HTMLElement).closest('.tile')) return;
-      if (state.selection?.area === 'cell') {
-        // Clicked empty rack space with a board tile selected → try return to rack.
-        const beforeIds = committedIds();
-        const s = state.selection;
-        const tile = s.area === 'cell' ? ensureDraft()[s.cell] : null;
-        if (tile && !beforeIds.has(tile.id) && myTurn()) {
-          ensureDraft()[s.cell] = null;
-          state.hand.push(tile);
-          state.selection = null;
-          scheduleDraftBroadcast();
-          render();
-        }
-      }
-    };
-    // Mouse rack reorder: the drop inserts into the gap nearest the pointer.
-    rackTiles.ondragover = (e) => {
-      if (!e.dataTransfer?.types.includes('text/rack')) return;
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
-      showGap(gapFromPoint(e.clientX, e.clientY));
-    };
-    rackTiles.ondragleave = (e) => {
-      if (!rackTiles.contains(e.relatedTarget as Node | null)) hideGap();
-    };
-    rackTiles.ondrop = (e) => {
-      const raw = e.dataTransfer?.getData('text/rack');
-      if (raw === undefined || raw === '') return;
-      e.preventDefault();
-      hideGap();
-      insertRack(Number(raw), gapFromPoint(e.clientX, e.clientY));
-      render();
-    };
-    rack.append(el('h3', '', `${state.name || 'You'} — your rack (${state.hand.length})`));
+    rack.append(el('h3', '', `${state.name || 'You'} — staging (${myTiles().length})`));
     rack.append(el('p', 'muted rack-hint',
       state.sortMode === 'manual'
-        ? 'Manual order — drag tiles between each other to rearrange (touch works too); new tiles join the right end.'
-        : 'Tip: drag a rack tile between others to arrange it yourself (switches to manual).'));
-    rack.append(rackTiles);
+        ? 'Manual order — press and drag any tile to move just it; double-tap a run to grab it, then drag the whole group (×N badge). Runs move to the board and back. New tiles join the first free slot.'
+        : 'Tip: press and drag a staging tile onto another slot to arrange it yourself (switches to manual). Double-tap a run to drag it whole.'));
+    const rackBody = el('div', 'rack-body');
+    const rackGridEl = el('div', 'grid-board rack-grid');
+    rackGridEl.style.setProperty('--cols', String(RACK_COLS));
+    rackGridRef = rackGridEl;
 
-    const toolbar = el('div', 'toolbar');
+    const rackSetOfCell = new Map<number, number>();
+    deriveRackSets(state.rack).forEach((d, i) => d.cells.forEach((c) => rackSetOfCell.set(c, i)));
+    for (let slot = 0; slot < state.rack.length; slot++) {
+      const tile = state.rack[slot];
+      const cellEl = el('div', 'cell' + (tile ? '' : ' empty'));
+      const setIdx = rackSetOfCell.get(slot);
+      if (setIdx !== undefined) cellEl.classList.add(setIdx % 2 === 0 ? 's0' : 's1');
+      const sel = state.selection;
+      const isSel =
+        (sel?.area === 'rack' && sel.index === slot) ||
+        (sel?.area === 'rackSet' && sel.cells.includes(slot));
+      if (tile) {
+        const t = tile;
+        const i = slot;
+        const isNew = state.justDrewId !== null && t.id === state.justDrewId;
+        const tEl = tileEl(t, `${isSel ? 'selected' : ''} ${isNew ? 'just-drew' : ''}`.trim());
+        if (isNew) tEl.title = 'Just drawn';
+        attachTileDrag(tEl, rackPressPayload(i), dragHooks);
+        cellEl.append(tEl);
+      } else {
+        cellEl.onclick = () => clickRackSlot(slot);
+      }
+      rackGridEl.append(cellEl);
+    }
+    rackBody.append(rackGridEl);
+
+    const toolbar = el('div', 'toolbar vertical');
     const endBtn = el('button', '', 'End Turn') as HTMLButtonElement;
     endBtn.disabled = !myTurn();
     endBtn.onclick = doEndTurn;
@@ -1138,23 +1131,18 @@ export function createApp() {
     drawBtn.disabled = !myTurn();
     drawBtn.onclick = doDraw;
     const sortBtn = el('button', 'secondary', SORT_LABEL[state.sortMode]) as HTMLButtonElement;
-    sortBtn.title = 'Rack order — click to cycle colour, number, manual';
+    sortBtn.title = 'Staging order — click to cycle colour, number, manual';
     sortBtn.onclick = cycleSortMode;
     const revertBtn = el('button', 'secondary', 'Revert board') as HTMLButtonElement;
-    revertBtn.disabled = !myTurn() || !draftDiffers();
+    revertBtn.disabled = !myTurn() || (!draftDiffers() && !rackDiffers());
+    revertBtn.title = 'Restore the board and staging grid to the turn start';
     revertBtn.onclick = doRevert;
     toolbar.append(endBtn, drawBtn, sortBtn, revertBtn);
-    rack.append(toolbar);
-    rack.append(Object.assign(el('div', 'message'), { textContent: '' }));
+    rackBody.append(toolbar);
+    rack.append(rackBody);
     wrap.append(rack);
     root.append(wrap);
     paintMessage();
-    const msgSlot = wrap.querySelector('.rack .message');
-    if (msgSlot) {
-      msgSlot.textContent = state.message;
-      msgSlot.className = `message ${state.messageKind}`;
-      msgSlot.setAttribute('data-msg', '1');
-    }
   }
 
   startLobbyWatch();

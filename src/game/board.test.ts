@@ -2,13 +2,23 @@ import { describe, expect, it } from 'vitest';
 import {
   GRID_COLS,
   GRID_SIZE,
+  RACK_COLS,
+  RACK_SIZE,
+  canPlaceSet,
+  deriveRackSets,
   deriveSets,
   emptyGrid,
+  emptyRack,
   findInvalidCells,
+  firstEmptyRackSlot,
   insertRackTile,
   layoutSetsToGrid,
+  moveBoardSetToRack,
+  moveRackSetToBoard,
   moveSet,
   moveTile,
+  rackFromTiles,
+  rackTiles,
   sortTiles,
 } from './board';
 import type { Tile } from './types';
@@ -126,5 +136,98 @@ describe('slot grid', () => {
     ]);
     expect(moveSet(grid, [0, 1, 2], 4)).toBeNull(); // overlaps second set
     expect(moveSet(grid, [0, 1, 2], GRID_COLS - 2)).toBeNull(); // past row end
+  });
+});
+
+describe('staging grid', () => {
+  it('packs tiles into a 2x15 grid and reads them back in slot order', () => {
+    const tiles = [num(1, 'a'), blue(2, 'b'), num(3, 'c')];
+    const rack = rackFromTiles(tiles);
+    expect(rack).toHaveLength(RACK_SIZE);
+    expect(rackTiles(rack).map((t) => t.id)).toEqual(['a', 'b', 'c']);
+    expect(emptyRack()).toHaveLength(RACK_SIZE);
+    expect(emptyRack().every((c) => c === null)).toBe(true);
+  });
+  it('finds the first free slot and grows by a row when full', () => {
+    const rack = rackFromTiles([num(1, 'a'), num(2, 'b')]);
+    rack[0] = null;
+    expect(firstEmptyRackSlot(rack)).toBe(0);
+    const full = rackFromTiles(Array.from({ length: RACK_SIZE }, (_, i) => num((i % 13) + 1, `t${i}`)));
+    const grownAt = firstEmptyRackSlot(full);
+    expect(grownAt).toBe(RACK_SIZE);
+    expect(full).toHaveLength(RACK_SIZE + RACK_COLS);
+  });
+  it('reads contiguous runs as sets with the rack column count', () => {
+    const rack = emptyRack();
+    rack[0] = num(1, 'a');
+    rack[1] = num(2, 'b');
+    rack[2] = num(3, 'c');
+    rack[RACK_COLS] = blue(5, 'd');
+    const sets = deriveRackSets(rack).map((s) => s.cells);
+    expect(sets).toEqual([[0, 1, 2], [RACK_COLS]]);
+  });
+  it('moves a whole run within the staging grid like on the board', () => {
+    const rack = emptyRack();
+    rack[0] = num(1, 'a');
+    rack[1] = num(2, 'b');
+    rack[2] = num(3, 'c');
+    const moved = moveSet(rack, [0, 1, 2], 5, RACK_COLS);
+    expect(moved?.[5]?.id).toBe('a');
+    expect(moved?.[7]?.id).toBe('c');
+    expect(moved?.[0]).toBeNull();
+    expect(moveSet(rack, [0, 1, 2], RACK_COLS - 2, RACK_COLS)).toBeNull(); // past row end
+  });
+  it('lifts a staged run onto the board and clears its slots', () => {
+    const rack = emptyRack();
+    rack[0] = num(1, 'a');
+    rack[1] = num(2, 'b');
+    rack[2] = num(3, 'c');
+    const board = emptyGrid();
+    const moved = moveRackSetToBoard(rack, board, [0, 1, 2], 4);
+    expect(moved?.board[4]?.id).toBe('a');
+    expect(moved?.board[6]?.id).toBe('c');
+    expect(moved?.rack.slice(0, 3).every((c) => c === null)).toBe(true);
+  });
+  it('refuses a staged run that overlaps board tiles or the row end', () => {
+    const rack = emptyRack();
+    rack[0] = num(1, 'a');
+    rack[1] = num(2, 'b');
+    const board = emptyGrid();
+    board[5] = blue(9, 'x');
+    expect(moveRackSetToBoard(rack, board, [0, 1], 4)).toBeNull(); // overlaps x
+    expect(moveRackSetToBoard(rack, board, [0, 1], GRID_COLS - 1)).toBeNull(); // past row end
+  });
+  it('returns a board run to the staging grid and clears its cells', () => {
+    const board = emptyGrid();
+    board[0] = num(1, 'a');
+    board[1] = num(2, 'b');
+    board[2] = num(3, 'c');
+    const rack = emptyRack();
+    const moved = moveBoardSetToRack(board, rack, [0, 1, 2], 5);
+    expect(moved?.rack[5]?.id).toBe('a');
+    expect(moved?.rack[7]?.id).toBe('c');
+    expect(moved?.board.slice(0, 3).every((c) => c === null)).toBe(true);
+  });
+  it('refuses a board run that overlaps staging tiles or the row end', () => {
+    const board = emptyGrid();
+    board[0] = num(1, 'a');
+    board[1] = num(2, 'b');
+    const rack = emptyRack();
+    rack[6] = blue(9, 'x');
+    expect(moveBoardSetToRack(board, rack, [0, 1], 5)).toBeNull(); // overlaps x
+    expect(moveBoardSetToRack(board, rack, [0, 1], RACK_COLS - 1)).toBeNull(); // past row end
+    expect(moveBoardSetToRack(board, rack, [], 5)).toBeNull();
+  });
+  it('checks set fit without moving anything', () => {
+    const grid = layoutSetsToGrid([
+      [num(1, 'a'), num(2, 'b'), num(3, 'c')],
+      [num(5, 'd'), num(5, 'e'), num(5, 'f')],
+    ]);
+    expect(canPlaceSet(grid, [0, 1, 2], 8)).toBe(true);
+    expect(canPlaceSet(grid, [0, 1, 2], 4)).toBe(false); // overlaps second set
+    expect(canPlaceSet(grid, [0, 1, 2], GRID_COLS - 2)).toBe(false); // past row end
+    expect(canPlaceSet(grid, [], 8)).toBe(false);
+    // A set dropped back onto the stretch it already owns still fits.
+    expect(canPlaceSet(grid, [8, 9, 10], 8)).toBe(true);
   });
 });
