@@ -1,0 +1,35 @@
+project_id = "rumikub"
+
+# No authentication: all functions are public and game access is by room code.
+# Every function below disables JWT verification for that reason.
+[functions.rooms-create]
+enabled = true
+verify_jwt = false
+
+[functions.rooms-list]
+enabled = true
+verify_jwt = false
+
+[functions.rooms-join]
+enabled = true
+verify_jwt = false
+
+[functions.rooms-leave]
+enabled = true
+verify_jwt = false
+
+[functions.game-start]
+enabled = true
+verify_jwt = false
+
+[functions.game-commit]
+enabled = true
+verify_jwt = false
+
+[functions.game-draw]
+enabled = true
+verify_jwt = false
+
+[functions.rooms-cleanup]
+enabled = true
+verify_jwt = false

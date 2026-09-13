@@ -40,3 +40,7 @@ Thumbs.db
 !.vscode/extensions.json
 .idea/
 *.sw?
+
+# Generated Edge Function bundle (rebuilt by npm run server:sync-shared)
+supabase/functions/_shared/server/
+supabase/functions/_shared/src/

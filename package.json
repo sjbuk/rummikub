@@ -8,15 +8,19 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "server:sync-shared": "node scripts/sync-shared.mjs",
+    "server:deploy": "npm run server:sync-shared && supabase db push && supabase functions deploy",
+    "server:dev": "supabase start"
   },
   "dependencies": {
     "trystero": "^0.25.4"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.1.0",
+    "supabase": "^2.117.0",
     "typescript": "^5.6.3",
     "vite": "^6.0.3",
-    "vitest": "^2.1.8",
-    "@tauri-apps/cli": "^2.1.0"
+    "vitest": "^2.1.8"
   }
 }

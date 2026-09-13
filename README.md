@@ -46,6 +46,7 @@ npm run tauri build
 - `src/net/` — P2P room handling and the serverless lobby (+ tests)
 - `src/ui/` — game UI
 - `src-tauri/` — Tauri desktop shell
+- `docs/game-server.md` — planned Supabase game server (design + contract, not yet implemented)
 - `.github/workflows/deploy.yml` — builds and deploys to GitHub Pages
 
 ## Hosting
@@ -53,3 +54,11 @@ npm run tauri build
 Pushes to `master` are automatically built and deployed to GitHub Pages
 via the `Deploy to GitHub Pages` workflow. No backend is needed — the
 multiplayer signaling uses Trystero's default public trackers.
+
+## Game server (implemented, client still P2P)
+
+A Supabase-backed authoritative server (2–4 players, preset board sizes,
+persisted rooms + live game state, no auth) is implemented in `server/` +
+`supabase/` with full unit tests. The web client is unchanged (still P2P).
+See [docs/game-server.md](docs/game-server.md) for the design and contract,
+and [server/README.md](server/README.md) for setup and deployment.
