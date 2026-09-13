@@ -12,7 +12,7 @@ export function emptyGrid(): Grid {
   return Array<Tile | null>(GRID_SIZE).fill(null);
 }
 
-export type SortMode = 'color' | 'number';
+export type SortMode = 'color' | 'number' | 'manual';
 
 const COLOR_ORDER: Record<string, number> = { red: 0, blue: 1, black: 2, yellow: 3 };
 
@@ -26,8 +26,12 @@ function compareTiles(a: Tile, b: Tile, mode: SortMode): number {
   return COLOR_ORDER[a.color] - COLOR_ORDER[b.color] || a.value - b.value;
 }
 
-/** Rack sorting. `color` groups by colour then number; `number` orders by value only. Jokers last. */
+/**
+ * Rack sorting. `color` groups by colour then number; `number` orders by
+ * value only. Jokers last. `manual` keeps the player's own arrangement.
+ */
 export function sortTiles(hand: Tile[], mode: SortMode): Tile[] {
+  if (mode === 'manual') return [...hand];
   return [...hand].sort((a, b) => compareTiles(a, b, mode));
 }
 

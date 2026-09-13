@@ -78,6 +78,12 @@ describe('slot grid', () => {
     const hand = [blue(3, 'b3'), num(11, 'r11'), blue(1, 'b1'), num(2, 'r2'), { id: 'j1', kind: 'joker' } as Tile];
     expect(sortTiles(hand, 'number').map((t) => t.id)).toEqual(['b1', 'r2', 'b3', 'r11', 'j1']);
   });
+  it('keeps the player arrangement untouched in manual mode', () => {
+    const hand = [blue(3, 'b3'), num(11, 'r11'), blue(1, 'b1'), num(2, 'r2'), { id: 'j1', kind: 'joker' } as Tile];
+    const sorted = sortTiles(hand, 'manual');
+    expect(sorted.map((t) => t.id)).toEqual(['b3', 'r11', 'b1', 'r2', 'j1']);
+    expect(sorted).not.toBe(hand); // a copy, so later pushes can't alias the old rack
+  });
   it('leaves same-number tiles in rack order when sorting by number', () => {
     const hand = [blue(5, 'b5'), num(2, 'r2'), num(5, 'r5'), blue(2, 'b2'), { id: 'j1', kind: 'joker' } as Tile];
     expect(sortTiles(hand, 'number').map((t) => t.id)).toEqual(['r2', 'b2', 'b5', 'r5', 'j1']);

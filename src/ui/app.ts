@@ -54,6 +54,8 @@ interface UiState {
   winner: Role | null;
   selection: Selection;
   sortMode: SortMode;
+  /** Turn chime + banner enabled. Persisted in localStorage. */
+  soundOn: boolean;
   message: string;
   messageKind: '' | 'error' | 'ok';
   connected: boolean;
@@ -96,6 +98,13 @@ export function createApp() {
     winner: null,
     selection: null,
     sortMode: 'color',
+    soundOn: ((): boolean => {
+      try {
+        return localStorage.getItem('rumikub-sound') !== 'off';
+      } catch {
+        return true;
+      }
+    })(),
     message: '',
     messageKind: '',
     connected: false,
@@ -108,6 +117,80 @@ export function createApp() {
     if (myTurn()) return state.draft ?? state.board;
     return state.peerView ?? state.board;
   };
+
+  // ---------- turn alerts: banner, tab title, chime ----------
+  let audioCtx: AudioContext | null = null;
+  /** Turn state on the previous render — a false→true edge fires the alert. */
+  let wasMyTurn = false;
+
+  function ensureAudio(): AudioContext | null {
+    if (!state.soundOn) return null;
+    try {
+      if (!audioCtx) {
+        const Ctor = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+        if (!Ctor) return null;
+        audioCtx = new Ctor();
+      }
+      if (audioCtx.state === 'suspended') void audioCtx.resume();
+      return audioCtx;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Short two-tone "bing" synthesized with Web Audio — no asset needed. */
+  function playTurnChime() {
+    const ctx = ensureAudio();
+    if (!ctx) return;
+    try {
+      const t0 = ctx.currentTime;
+      const notes = [
+        { freq: 659.25, at: 0 }, // E5
+        { freq: 987.77, at: 0.12 }, // B5
+      ];
+      for (const { freq, at } of notes) {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = freq;
+        gain.gain.setValueAtTime(0.0001, t0 + at);
+        gain.gain.exponentialRampToValueAtTime(0.25, t0 + at + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t0 + at + 0.35);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(t0 + at);
+        osc.stop(t0 + at + 0.4);
+      }
+    } catch {
+      // Sound is best-effort; the banner always shows.
+    }
+  }
+
+  // Browsers gate audio behind a user gesture — unlock the context on first input.
+  const unlockAudio = () => { ensureAudio(); };
+  window.addEventListener('pointerdown', unlockAudio, { once: true });
+  window.addEventListener('keydown', unlockAudio, { once: true });
+
+  function toggleSound() {
+    state.soundOn = !state.soundOn;
+    try {
+      localStorage.setItem('rumikub-sound', state.soundOn ? 'on' : 'off');
+    } catch {
+      // Private-mode storage failure shouldn't break the toggle.
+    }
+    if (state.soundOn) playTurnChime();
+    render();
+  }
+
+  /** Fire the turn alert once per false→true edge while a game is live. */
+  function noteTurn() {
+    const mine = myTurn();
+    const becameMine = mine && !wasMyTurn && state.screen === 'game' && state.dealt && !state.winner;
+    wasMyTurn = mine;
+    document.title = mine && state.screen === 'game' && !state.winner
+      ? 'Your turn! — Rummikub P2P'
+      : 'Rummikub — P2P';
+    if (becameMine) playTurnChime();
+  }
 
   // Live spectator sync: stream the draft while arranging (debounced).
   let draftTimer: ReturnType<typeof setTimeout> | null = null;
@@ -389,7 +472,36 @@ export function createApp() {
 
   /** Sorts the rack in the current mode; the button label always names this same mode. */
   function sortHand() {
+    // Manual keeps the player's arrangement; drawn tiles were pushed to the right end.
     state.hand = sortTiles(state.hand, state.sortMode);
+  }
+
+  const SORT_LABEL: Record<SortMode, string> = {
+    color: 'Sort: colour',
+    number: 'Sort: number',
+    manual: 'Sort: manual',
+  };
+
+  function cycleSortMode() {
+    state.sortMode = state.sortMode === 'color' ? 'number' : state.sortMode === 'number' ? 'manual' : 'color';
+    sortHand();
+    if (state.sortMode === 'manual') say('Manual rack order — drag tiles to rearrange; new tiles join the right end.');
+    render();
+  }
+
+  /** Move a rack tile from one slot to another, keeping the player's manual order. */
+  function moveRack(from: number, to: number) {
+    if (!Number.isInteger(from) || !Number.isInteger(to)) return;
+    if (from < 0 || from >= state.hand.length || to < 0 || to > state.hand.length) return;
+    if (from === to) return;
+    const [t] = state.hand.splice(from, 1);
+    state.hand.splice(to, 0, t);
+    state.selection = null;
+    // A hand-arranged rack is manual from here on — auto-sort would undo it.
+    if (state.sortMode !== 'manual') {
+      state.sortMode = 'manual';
+      say('Manual rack order — your arrangement is kept; new tiles join the right end.');
+    }
   }
 
   function doDraw() {
@@ -568,9 +680,8 @@ export function createApp() {
       return;
     }
     if (s?.area === 'rack') {
-      const [t] = state.hand.splice(s.index, 1);
-      state.hand.splice(i, 0, t);
-      state.selection = null;
+      // Tap two rack tiles to reorder — the rack becomes manual so the order sticks.
+      moveRack(s.index, i);
       render();
       return;
     }
@@ -594,6 +705,7 @@ export function createApp() {
   }
 
   function render() {
+    noteTurn();
     root.innerHTML = '';
     if (state.screen === 'lobby') renderLobby();
     else renderGame();
@@ -715,6 +827,7 @@ export function createApp() {
         screen: 'lobby', hand: [], board: emptyGrid(), draft: null, peerView: null, pool: [],
         winner: null, dealt: false, connected: false, message: '', justDrewId: null,
       } as Partial<UiState>);
+      wasMyTurn = false;
       startLobbyWatch();
       render();
     };
@@ -726,14 +839,24 @@ export function createApp() {
       state.winner ? `Winner: ${state.winner === state.role ? state.name || 'You' : state.peerName}`
         : myTurn() ? 'Your turn — arrange, then End Turn'
           : state.peerView ? `${state.peerName} is arranging…` : `${state.peerName}'s turn`);
+    const soundBtn = el('button', 'secondary sound-toggle', state.soundOn ? 'Sound: on' : 'Sound: off') as HTMLButtonElement;
+    soundBtn.title = 'Toggle the turn alert sound';
+    soundBtn.onclick = toggleSound;
     status.append(
       turnPill,
       el('div', 'pill', `Pool: ${state.role === 'host' ? state.pool.length : state.poolCount}`),
       el('div', 'pill', `${state.peerName}: ${state.role === 'host' ? state.peerHandCount : '—'} tiles`),
       el('div', 'pill', state.melded ? 'Melded ✓' : 'Need 30+ meld'),
       el('div', 'pill', state.connected ? '● live' : '○ waiting…'),
+      soundBtn,
     );
     wrap.append(status);
+
+    if (myTurn() && !state.winner) {
+      const banner = el('div', 'turn-banner', 'Your turn — play tiles or draw a tile');
+      banner.setAttribute('role', 'status');
+      wrap.append(banner);
+    }
 
     if (myTurn()) ensureDraft();
     const grid = shownGrid();
@@ -800,7 +923,7 @@ export function createApp() {
     boardCard.append(el('p', 'muted', 'Drag a tile to move it (drop on another tile to swap). Tap a tile twice to grab its whole set, then click or drag it to a destination cell — a set needs a free stretch in one row. Your opponent watches live as you arrange.'));
     wrap.append(boardCard);
 
-    const rack = el('div', 'rack');
+    const rack = el('div', `rack${myTurn() ? ' my-turn' : ''}`);
     const rackTiles = el('div', 'tiles');
     state.hand.forEach((t, i) => {
       const sel = state.selection?.area === 'rack' && state.selection.index === i;
@@ -809,7 +932,27 @@ export function createApp() {
       if (isNew) tEl.title = 'Just drawn';
       tEl.setAttribute('draggable', 'true');
       tEl.onclick = () => clickRackTile(i);
-      tEl.ondragstart = (e) => { e.dataTransfer?.setData('text/rack', String(i)); };
+      tEl.ondragstart = (e) => {
+        e.dataTransfer?.setData('text/rack', String(i));
+        if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+      };
+      // Drop a dragged rack tile onto another to reorder the rack.
+      tEl.ondragover = (e) => {
+        if (!e.dataTransfer?.types.includes('text/rack')) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        tEl.classList.add('drop-before');
+      };
+      tEl.ondragleave = () => tEl.classList.remove('drop-before');
+      tEl.ondrop = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        tEl.classList.remove('drop-before');
+        const raw = e.dataTransfer?.getData('text/rack');
+        if (raw === undefined || raw === '') return;
+        moveRack(Number(raw), i);
+        render();
+      };
       rackTiles.append(tEl);
     });
     rackTiles.onclick = (e) => {
@@ -828,8 +971,24 @@ export function createApp() {
         }
       }
     };
-    rackTiles.ondragover = (e) => e.preventDefault();
+    rackTiles.ondragover = (e) => {
+      e.preventDefault();
+      if (e.dataTransfer && e.dataTransfer.types.includes('text/rack')) e.dataTransfer.dropEffect = 'move';
+    };
+    rackTiles.ondrop = (e) => {
+      // Tile-level drops stop propagation; reaching here means empty rack space → move to the end.
+      if ((e.target as HTMLElement).closest('.tile')) return;
+      const raw = e.dataTransfer?.getData('text/rack');
+      if (raw === undefined || raw === '') return;
+      e.preventDefault();
+      moveRack(Number(raw), state.hand.length);
+      render();
+    };
     rack.append(el('h3', '', `${state.name || 'You'} — your rack (${state.hand.length})`));
+    rack.append(el('p', 'muted rack-hint',
+      state.sortMode === 'manual'
+        ? 'Manual order — drag tiles to rearrange; new tiles join the right end.'
+        : 'Tip: drag a rack tile onto another to arrange it yourself (switches to manual).'));
     rack.append(rackTiles);
 
     const toolbar = el('div', 'toolbar');
@@ -839,13 +998,9 @@ export function createApp() {
     const drawBtn = el('button', 'secondary', 'Draw tile') as HTMLButtonElement;
     drawBtn.disabled = !myTurn();
     drawBtn.onclick = doDraw;
-    const sortBtn = el('button', 'secondary', state.sortMode === 'color' ? 'Sort: colour' : 'Sort: number') as HTMLButtonElement;
-    sortBtn.title = 'Rack order — click to switch between colour and number';
-    sortBtn.onclick = () => {
-      state.sortMode = state.sortMode === 'color' ? 'number' : 'color';
-      sortHand();
-      render();
-    };
+    const sortBtn = el('button', 'secondary', SORT_LABEL[state.sortMode]) as HTMLButtonElement;
+    sortBtn.title = 'Rack order — click to cycle colour, number, manual';
+    sortBtn.onclick = cycleSortMode;
     const revertBtn = el('button', 'secondary', 'Revert board') as HTMLButtonElement;
     revertBtn.disabled = !myTurn() || !draftDiffers();
     revertBtn.onclick = doRevert;

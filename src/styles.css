@@ -73,7 +73,32 @@ button:not(:disabled):hover { filter: brightness(1.06); }
   border: 1px solid rgba(255,255,255,0.16);
   padding: 6px 12px; border-radius: 999px; font-size: 14px;
 }
-.pill.turn { background: rgba(242,193,78,0.2); border-color: var(--gold); }
+.pill.turn { background: rgba(242,193,78,0.2); border-color: var(--gold); animation: turn-glow 1.6s ease-in-out infinite; }
+@keyframes turn-glow {
+  0%, 100% { background: rgba(242,193,78,0.2); }
+  50% { background: rgba(242,193,78,0.38); }
+}
+/* Full-width "your turn" banner — the primary turn indicator alongside the chime. */
+.turn-banner {
+  margin: 0 0 12px;
+  padding: 12px 16px;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #ffd873, var(--gold));
+  color: #3a2a00;
+  font-weight: 800;
+  font-size: 17px;
+  text-align: center;
+  border: 1px solid rgba(0, 0, 0, 0.25);
+  box-shadow: 0 4px 18px rgba(242, 193, 78, 0.35);
+  animation: turn-pulse 1.6s ease-in-out infinite;
+}
+@keyframes turn-pulse {
+  0%, 100% { transform: scale(1); box-shadow: 0 4px 18px rgba(242, 193, 78, 0.35); }
+  50% { transform: scale(1.015); box-shadow: 0 4px 26px rgba(242, 193, 78, 0.55); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .turn-banner, .pill.turn { animation: none; }
+}
 
 .grid-board {
   display: grid;
@@ -147,6 +172,11 @@ button:not(:disabled):hover { filter: brightness(1.06); }
 }
 .rack .tiles { display: flex; gap: 6px; flex-wrap: wrap; }
 .rack h3 { margin: 0 0 8px; font-size: 14px; opacity: 0.8; }
+/* Gold frame on the rack while it's your turn. */
+.rack.my-turn { border-color: var(--gold); box-shadow: 0 0 0 1px var(--gold), 0 8px 24px rgba(0, 0, 0, 0.35); }
+.rack-hint { font-size: 12px; margin: 0 0 8px; }
+.tile.drop-before { outline: 3px solid var(--gold); outline-offset: -1px; }
+.sound-toggle { padding: 6px 12px; border-radius: 999px; font-size: 14px; font-weight: 600; }
 
 .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
 .check { display: flex; gap: 8px; align-items: center; margin-top: 12px; font-size: 14px; cursor: pointer; }
