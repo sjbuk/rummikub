@@ -2,6 +2,7 @@ import { joinRoom } from 'trystero';
 import type { JsonValue } from '@trystero-p2p/core';
 import type { Tile } from '../game/types';
 import type { Grid } from '../game/board';
+import { LOBBY_CODE, type LobbyMessage } from './lobby';
 
 export const APP_ID = 'rumikub-p2p-v1';
 
@@ -32,6 +33,27 @@ export function makeRoom(code: string, onMessage: (msg: NetMessage, peerId: stri
     leave: () => void room.leave(),
     onPeerJoin: (cb) => { room.onPeerJoin = cb; },
     onPeerLeave: (cb) => { room.onPeerLeave = cb; },
+  };
+}
+
+export interface LobbyHandle {
+  send: (msg: LobbyMessage) => void;
+  leave: () => void;
+  /** WebRTC peers currently connected in the lobby room. */
+  peerCount: () => number;
+}
+
+/** Join the well-known lobby room used for open-game announcements. */
+export function makeLobbyRoom(onMessage: (msg: LobbyMessage) => void): LobbyHandle {
+  const room = joinRoom({ appId: APP_ID }, LOBBY_CODE);
+  const action = room.makeAction('lobby');
+  action.onMessage = (data) => {
+    onMessage(data as unknown as LobbyMessage);
+  };
+  return {
+    send: (msg) => void action.send(msg as unknown as JsonValue),
+    leave: () => void room.leave(),
+    peerCount: () => Object.keys(room.getPeers()).length,
   };
 }
 

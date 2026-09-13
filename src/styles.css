@@ -149,6 +149,11 @@ button:not(:disabled):hover { filter: brightness(1.06); }
 .rack h3 { margin: 0 0 8px; font-size: 14px; opacity: 0.8; }
 
 .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.check { display: flex; gap: 8px; align-items: center; margin-top: 12px; font-size: 14px; cursor: pointer; }
+.check input { width: auto; accent-color: var(--gold); }
+.open-list { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.open-row { display: flex; gap: 10px; align-items: center; }
+.open-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .message { min-height: 22px; margin-top: 10px; font-size: 14px; }
 .message.error { color: #ff9d9d; }
 .message.ok { color: #9df0b6; }

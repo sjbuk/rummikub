@@ -12,7 +12,14 @@ import {
   type SortMode,
 } from '../game/board';
 import type { Tile } from '../game/types';
-import { makeRoom, randomCode, type NetHandle, type NetMessage } from '../net/p2p';
+import { makeLobbyRoom, makeRoom, randomCode, type LobbyHandle, type NetHandle, type NetMessage } from '../net/p2p';
+import {
+  ANNOUNCE_MS,
+  isLobbyMessage,
+  pruneGames,
+  upsertGame,
+  type OpenGame,
+} from '../net/lobby';
 
 type Role = 'host' | 'guest';
 type Selection =
@@ -27,6 +34,10 @@ interface UiState {
   code: string;
   name: string;
   peerName: string;
+  /** Hide my hosted game from the public lobby list. */
+  isPrivate: boolean;
+  /** Open public games seen via lobby announcements. */
+  openGames: OpenGame[];
   hand: Tile[];
   board: Grid;
   draft: Grid | null;
@@ -69,6 +80,8 @@ export function createApp() {
     code: '',
     name: '',
     peerName: 'Opponent',
+    isPrivate: false,
+    openGames: [],
     hand: [],
     board: emptyGrid(),
     draft: null,
@@ -108,6 +121,102 @@ export function createApp() {
       }
     }, 120);
   }
+  // ---------- open-game discovery (serverless lobby) ----------
+  // One lobby room for the life of the home page: leaving and instantly
+  // rejoining the same room races with Trystero's async leave, so the host
+  // keeps this room and only toggles its heartbeat.
+  let lobby: LobbyHandle | null = null;
+  let watchTimer: ReturnType<typeof setInterval> | null = null;
+  let announcing = false;
+  let announceTimer: ReturnType<typeof setInterval> | null = null;
+  let announceBursts: ReturnType<typeof setTimeout>[] = [];
+  let lastLobbyPeers = -1;
+
+  const lobbySignature = (): string => state.openGames.map((g) => `${g.code}=${g.name}`).join('|');
+  const lobbyPeerCount = (): number => lobby?.peerCount() ?? 0;
+
+  /** Re-render the home page only when something visible changed. */
+  function maybeRenderLobby(before: string) {
+    if (state.screen !== 'lobby') return;
+    const peers = lobbyPeerCount();
+    if (lobbySignature() !== before || peers !== lastLobbyPeers) {
+      lastLobbyPeers = peers;
+      render();
+    }
+  }
+
+  function onLobby(data: unknown) {
+    if (!isLobbyMessage(data)) return;
+    const before = lobbySignature();
+    state.openGames = upsertGame(state.openGames, data, Date.now());
+    maybeRenderLobby(before);
+  }
+
+  /** Join the lobby room; prune quiet listings and refresh peer state. */
+  function startLobbyWatch() {
+    if (!lobby) {
+      lobby = makeLobbyRoom(onLobby);
+      lastLobbyPeers = -1;
+    }
+    if (!watchTimer) {
+      watchTimer = setInterval(() => {
+        const before = lobbySignature();
+        state.openGames = pruneGames(state.openGames, Date.now());
+        maybeRenderLobby(before);
+      }, 5000);
+    }
+  }
+
+  function stopLobbyWatch() {
+    if (watchTimer) {
+      clearInterval(watchTimer);
+      watchTimer = null;
+    }
+    if (lobby) {
+      lobby.leave();
+      lobby = null;
+    }
+    lastLobbyPeers = -1;
+  }
+
+  /** Public hosts heartbeat their game until a guest joins. */
+  function startAnnounce() {
+    if (state.isPrivate || announcing) return;
+    if (!lobby) startLobbyWatch();
+    announcing = true;
+    const code = state.code;
+    const beat = () => {
+      if (announcing && state.code === code) lobby?.send({ t: 'hosting', code, name: state.name });
+    };
+    // Burst the first beats: early ones are lost while relays connect.
+    beat();
+    announceBursts.push(setTimeout(beat, 2000), setTimeout(beat, 5000));
+    announceTimer = setInterval(beat, ANNOUNCE_MS);
+  }
+
+  function stopAnnounce() {
+    if (announceTimer) {
+      clearInterval(announceTimer);
+      announceTimer = null;
+    }
+    for (const t of announceBursts) clearTimeout(t);
+    announceBursts = [];
+    // Only the announcer withdraws; guests must never close someone's listing.
+    if (announcing && lobby && state.code) lobby.send({ t: 'closed', code: state.code });
+    announcing = false;
+  }
+
+  function joinGame(code: string, name: string) {
+    state.name = name.trim() || 'Guest';
+    state.role = 'guest';
+    state.code = code;
+    state.screen = 'game';
+    stopLobbyWatch();
+    connect(code, 'guest');
+    render();
+    say('Connecting… waiting for host to deal.');
+  }
+
   const committedTiles = (): Tile[] => (state.board.filter(Boolean) as Tile[]);
   const committedIds = (): Set<string> => new Set(committedTiles().map((t) => t.id));
 
@@ -135,6 +244,7 @@ export function createApp() {
   }
 
   function deal() {
+    stopAnnounce();
     const deck = shuffle(buildDeck());
     const hostHand = deck.slice(0, HAND_SIZE);
     const guestHand = deck.slice(HAND_SIZE, HAND_SIZE * 2);
@@ -520,11 +630,21 @@ export function createApp() {
       state.screen = 'game';
       state.dealt = false;
       connect(state.code, 'host');
+      startAnnounce();
       history.replaceState(null, '', `#room=${state.code}`);
       render();
-      say('Share the code — waiting for opponent…');
+      say(state.isPrivate ? 'Share the code — waiting for opponent…' : 'Listed as an open game — waiting for opponent…');
     };
-    hostCard.append(nameH, el('br'), el('br'), hostBtn);
+    const privLabel = document.createElement('label');
+    privLabel.className = 'check';
+    const privBox = document.createElement('input');
+    privBox.type = 'checkbox';
+    privBox.checked = state.isPrivate;
+    privBox.onchange = () => {
+      state.isPrivate = privBox.checked;
+    };
+    privLabel.append(privBox, document.createTextNode(' Private — hide from the open games list'));
+    hostCard.append(nameH, el('br'), el('br'), hostBtn, privLabel);
 
     const joinCard = el('div', 'card');
     joinCard.append(el('h2', '', 'Join a game'), el('p', 'muted', 'Enter the room code from your opponent.'));
@@ -540,18 +660,37 @@ export function createApp() {
     joinBtn.onclick = () => {
       const code = codeIn.value.trim().toUpperCase();
       if (!code) return;
-      state.name = nameJ.value.trim() || 'Guest';
-      state.role = 'guest';
-      state.code = code;
-      state.screen = 'game';
-      connect(code, 'guest');
-      render();
-      say('Connecting… waiting for host to deal.');
+      joinGame(code, nameJ.value);
     };
     joinCard.append(nameJ, el('br'), el('br'), codeIn, el('br'), el('br'), joinBtn);
 
     grid.append(hostCard, joinCard);
     wrap.append(grid);
+
+    const openCard = el('div', 'card');
+    openCard.style.marginTop = '16px';
+    openCard.append(el('h2', '', 'Open games'));
+    if (state.openGames.length === 0) {
+      openCard.append(el('p', 'muted', 'No open games right now — host one above or enter a code.'));
+    } else {
+      const list = el('div', 'open-list');
+      for (const g of state.openGames) {
+        const row = el('div', 'open-row');
+        row.append(el('div', 'open-name', `${g.name}’s game`), el('div', 'pill', g.code));
+        const joinOpen = el('button', '', 'Join') as HTMLButtonElement;
+        joinOpen.onclick = () => joinGame(g.code, nameJ.value);
+        row.append(joinOpen);
+        list.append(row);
+      }
+      openCard.append(list);
+    }
+    const peers = lobbyPeerCount();
+    openCard.append(
+      el('p', 'muted', peers > 0
+        ? `Lobby live — ${peers} peer${peers === 1 ? '' : 's'} nearby.`
+        : 'Connecting to the lobby… listings appear once connected.'),
+    );
+    wrap.append(openCard);
     const rules = el('div', 'card');
     rules.style.marginTop = '16px';
     rules.innerHTML = `<h2>How it works</h2>
@@ -571,10 +710,12 @@ export function createApp() {
     leave.onclick = () => {
       net?.leave();
       net = null;
+      stopAnnounce();
       Object.assign(state, {
         screen: 'lobby', hand: [], board: emptyGrid(), draft: null, peerView: null, pool: [],
         winner: null, dealt: false, connected: false, message: '', justDrewId: null,
       } as Partial<UiState>);
+      startLobbyWatch();
       render();
     };
     bar.append(brand, leave);
@@ -722,6 +863,7 @@ export function createApp() {
     }
   }
 
+  startLobbyWatch();
   render();
   return { render, state };
 }
