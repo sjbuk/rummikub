@@ -178,6 +178,7 @@ export async function projectState(db: Db, room: RoomRow, yourSeat: number): Pro
   const seats = (await db.listSeats(room.code)).sort((a, b) => a.seat - b.seat);
   const game = await db.getGame(room.code);
   const mine = seats.find((s) => s.seat === yourSeat);
+  const draft = game?.draft ?? [];
   return {
     code: room.code,
     preset: room.preset,
@@ -195,5 +196,8 @@ export async function projectState(db: Db, room: RoomRow, yourSeat: number): Pro
     })),
     yourSeat,
     hand: mine ? [...mine.hand] : null,
+    // The turn holder sees their own arranging grid; everyone else sees it
+    // here. Empty draft reads as null so clients can skip re-layout.
+    draftView: draft.length > 0 && game && yourSeat !== game.turnSeat ? draft : null,
   };
 }

@@ -1,4 +1,4 @@
-import { commitTurn, drawTile, startGame } from './game.ts';
+import { commitTurn, drawTile, startGame, submitDraft } from './game.ts';
 import { createRoom, joinRoom, leaveRoom, listRooms, projectState } from './rooms.ts';
 import {
   EMPTY_ROOM_TTL_MS,
@@ -100,6 +100,18 @@ export async function handleGameCommit(db: Db, input: unknown, deps: CallDeps = 
 export async function handleGameDraw(db: Db, input: unknown, deps: CallDeps = {}): Promise<ApiResult> {
   try {
     return ok(await drawTile(db, codeOf(input), seatOf(input), deps.now ?? Date.now()));
+  } catch (e) {
+    return err(e);
+  }
+}
+
+/** POST /game-draft { code, seat, board } -> 200 { ok } (spectator view). */
+export async function handleGameDraft(db: Db, input: unknown, deps: CallDeps = {}): Promise<ApiResult> {
+  try {
+    const body = input as { board?: unknown };
+    return ok(
+      await submitDraft(db, codeOf(input), seatOf(input), body?.board, deps.now ?? Date.now()),
+    );
   } catch (e) {
     return err(e);
   }

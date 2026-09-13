@@ -69,4 +69,6 @@ export const api = {
     call<PublicState>('/game-commit', input),
   drawTile: (input: { code: string; seat: number }) => call<DrawResult>('/game-draw', input),
   getState: (input: { code: string; seat: number }) => call<PublicState>('/rooms-state', input),
+  draftBoard: (input: { code: string; seat: number; board: BoardSet[] }) =>
+    call<{ ok: boolean }>('/game-draft', input),
 };

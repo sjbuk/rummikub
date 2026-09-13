@@ -38,6 +38,7 @@ interface GameRecord {
   board: BoardSet[];
   pool: Tile[];
   turn_seat: number;
+  draft: BoardSet[];
 }
 
 function toRoom(r: RoomRecord): RoomRow {
@@ -65,7 +66,7 @@ function toSeat(s: SeatRecord): SeatRow {
 }
 
 function toGame(g: GameRecord): GameRow {
-  return { roomCode: g.room_code, board: g.board, pool: g.pool, turnSeat: g.turn_seat };
+  return { roomCode: g.room_code, board: g.board, pool: g.pool, turnSeat: g.turn_seat, draft: g.draft ?? [] };
 }
 
 function must<T>(res: { data: T; error: unknown }, what: string): NonNullable<T> {
@@ -166,7 +167,7 @@ export function makeSupabaseDb(client: SupabaseClient): Db {
     async upsertGame(game) {
       must(
         await client.from('games').upsert(
-          { room_code: game.roomCode, board: game.board, pool: game.pool, turn_seat: game.turnSeat },
+          { room_code: game.roomCode, board: game.board, pool: game.pool, turn_seat: game.turnSeat, draft: game.draft },
           { onConflict: 'room_code' },
         ),
         'upsertGame',

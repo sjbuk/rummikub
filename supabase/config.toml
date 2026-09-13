@@ -37,3 +37,7 @@ verify_jwt = false
 [functions.rooms-state]
 enabled = true
 verify_jwt = false
+
+[functions.game-draft]
+enabled = true
+verify_jwt = false

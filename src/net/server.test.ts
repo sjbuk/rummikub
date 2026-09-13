@@ -47,6 +47,13 @@ describe('api client', () => {
     expect(err.status).toBe(409);
     expect(err.error).toBe('room_full');
   });
+  it('POSTs draft boards to game-draft', async () => {
+    const stub = mockFetchOnce(200, { ok: true });
+    await api.draftBoard({ code: 'ABCDE', seat: 0, board: [] });
+    const [url, init] = stub.mock.calls[0] as [string, RequestInit];
+    expect(url.endsWith('/game-draft')).toBe(true);
+    expect(init.method).toBe('POST');
+  });
   it('maps network failures to status 0', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('down')));
     const err = await api.listRooms().catch((e) => e);

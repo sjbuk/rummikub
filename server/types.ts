@@ -59,6 +59,8 @@ export interface GameRow {
   board: BoardSet[];
   pool: Tile[];
   turnSeat: number;
+  /** Live arrangement the turn holder is working on ([] = none). */
+  draft: BoardSet[];
 }
 
 /** Public seat info: hand counts only, never tiles. */
@@ -82,6 +84,8 @@ export interface PublicState {
   seats: PublicSeat[];
   yourSeat: number;
   hand: Tile[] | null;
+  /** Turn holder's live draft for everyone else; null for the holder. */
+  draftView: BoardSet[] | null;
 }
 
 /** Lobby listing entry for one open public room. */

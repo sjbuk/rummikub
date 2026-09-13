@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { makeFakeDb } from './fake-db';
 import {
   handleGameCommit,
+  handleGameDraft,
   handleGameDraw,
   handleGameStart,
   handleRoomsCleanup,
@@ -80,6 +81,17 @@ describe('game handlers', () => {
     expect(drawn.status).toBe(200);
     expect((drawn.body as { drew: Tile | null }).drew).not.toBeNull();
     expect((drawn.body as { turnSeat: number }).turnSeat).toBe(0);
+  });
+  it('publishes drafts for spectators and rejects strangers', async () => {
+    const { db, code } = await lobby();
+    await handleGameStart(db, { code, seat: 0 }, {});
+    const published = await handleGameDraft(db, { code, seat: 0, board: [[MELD[0]]] }, {});
+    expect(published).toEqual({ status: 200, body: { ok: true } });
+    const seen = await handleRoomsState(db, { code, seat: 1 });
+    expect((seen.body as { draftView: unknown }).draftView).toEqual([[MELD[0]]]);
+    const refused = await handleGameDraft(db, { code, seat: 1, board: [] }, {});
+    expect(refused.status).toBe(409);
+    expect(refused.body).toMatchObject({ error: 'not_your_turn' });
   });
   it('rejects non-host starts and invalid commits with error names', async () => {
     const { db, code } = await lobby();

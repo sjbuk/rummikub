@@ -6,10 +6,12 @@ export {
   drawTile,
   nextTurn,
   startGame,
+  submitDraft,
   turnOrder,
 } from './game.ts';
 export {
   handleGameCommit,
+  handleGameDraft,
   handleGameDraw,
   handleGameStart,
   handleRoomsCleanup,

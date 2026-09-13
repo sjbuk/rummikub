@@ -97,7 +97,7 @@ export async function startGame(
     row.hasMelded = false;
     await db.updateSeat(row);
   }
-  await db.upsertGame({ roomCode: code, board: [], pool: deck.slice(cursor), turnSeat: 0 });
+  await db.upsertGame({ roomCode: code, board: [], pool: deck.slice(cursor), turnSeat: 0, draft: [] });
   room.phase = 'playing';
   room.winnerSeat = null;
   room.lastActivityAt = now;
@@ -163,6 +163,7 @@ export async function commitTurn(
   me.hasMelded = true;
   await db.updateSeat(me);
   game.board = board;
+  game.draft = [];
 
   if (me.hand.length === 0) {
     room.phase = 'gameover';
@@ -206,6 +207,7 @@ export async function drawTile(
   const drew = game.pool.pop() ?? null;
   if (drew) me.hand = [...me.hand, drew];
   await db.updateSeat(me);
+  game.draft = [];
   const seats = await db.listSeats(code);
   game.turnSeat = nextTurn(
     seats.map((s) => ({ seat: s.seat, connected: s.connected })),
@@ -216,4 +218,33 @@ export async function drawTile(
   await db.upsertGame(game);
   const state = await projectState(db, room, seat as number);
   return { ...state, drew };
+}
+
+/**
+ * Publish the turn holder's in-progress arrangement for spectators.
+ * Shape-checked only (mid-arrange boards are legitimately invalid);
+ * only the current turn holder may publish. Cleared by commit/draw.
+ */
+export async function submitDraft(
+  db: Db,
+  rawCode: unknown,
+  seat: unknown,
+  rawBoard: unknown,
+  now: number = Date.now(),
+): Promise<{ ok: boolean }> {
+  const code = normalizeCode(rawCode);
+  if (!Number.isInteger(seat)) throw new ServerError(400, 'bad_seat', 'Seat must be an integer.');
+
+  const room = await db.getRoom(code);
+  if (!room) throw new ServerError(404, 'no_room', 'No room with that code.');
+  if (room.phase !== 'playing') throw new ServerError(409, 'not_playing', 'That game is not in play.');
+  const game = await db.getGame(code);
+  if (!game) throw new ServerError(500, 'no_game', 'Game state missing.');
+  if (game.turnSeat !== seat) throw new ServerError(409, 'not_your_turn', 'It is not your turn.');
+
+  game.draft = checkBoard(rawBoard);
+  room.lastActivityAt = now;
+  await db.updateRoom(room);
+  await db.upsertGame(game);
+  return { ok: true };
 }

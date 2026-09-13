@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { HAND_SIZE } from '../src/game/rules';
 import type { BoardSet, Tile } from '../src/game/types';
 import { makeFakeDb } from './fake-db';
-import { checkBoard, checkTile, commitTurn, drawTile, nextTurn, startGame, turnOrder } from './game';
-import { createRoom, joinRoom } from './rooms';
+import { checkBoard, checkTile, commitTurn, drawTile, nextTurn, startGame, submitDraft, turnOrder } from './game';
+import { createRoom, joinRoom, projectState } from './rooms';
 import { type Db, ServerError } from './types';
 
 async function expectError(p: Promise<unknown>, status: number, code: string) {
@@ -200,6 +200,35 @@ describe('commitTurn', () => {
   it('rejects malformed placedIds', async () => {
     const { db, code } = await started(['A', 'B']);
     await expectError(commitTurn(db, code, 0, { board: meldBoard(), placedIds: 'm1' }), 400, 'bad_placed');
+  });
+});
+
+describe('submitDraft', () => {
+  it('shows the live arrangement to spectators but not the holder', async () => {
+    const { db, code } = await started(['A', 'B']);
+    await submitDraft(db, code, 0, meldBoard());
+    const room = (await db.getRoom(code))!;
+    expect((await projectState(db, room, 0)).draftView).toBeNull();
+    expect((await projectState(db, room, 1)).draftView).toEqual(meldBoard());
+  });
+  it('accepts mid-arrange (invalid) boards but rejects garbage and strangers', async () => {
+    const { db, code } = await started(['A', 'B']);
+    const partial: BoardSet[] = [[num('red', 4, 'r4')]]; // single tile: invalid set, fine live
+    await submitDraft(db, code, 0, partial);
+    const room = (await db.getRoom(code))!;
+    expect((await projectState(db, room, 1)).draftView).toEqual(partial);
+    await expectError(submitDraft(db, code, 1, partial), 409, 'not_your_turn');
+    await expectError(submitDraft(db, code, 0, [[{ id: 'x' }]]), 400, 'bad_tile');
+    await expectError(submitDraft(db, code, 'x', partial), 400, 'bad_seat');
+  });
+  it('clears the draft on commit', async () => {
+    const { db, code } = await started(['A', 'B']);
+    await setHand(db, code, 0, [...MELD_TILES]);
+    await submitDraft(db, code, 0, meldBoard());
+    await commitTurn(db, code, 0, { board: meldBoard(), placedIds: meldIds() });
+    const room = (await db.getRoom(code))!;
+    // Game is over (rack emptied); winner sees the final board, no draft.
+    expect((await projectState(db, room, 1)).draftView).toBeNull();
   });
 });
 

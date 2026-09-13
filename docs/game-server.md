@@ -1,9 +1,10 @@
 # Game server (Supabase) — design and contract
 
 Status: implemented and wired up — `server/` core, Supabase migrations,
-9 Edge Functions (rooms-*, game-*, rooms-state polling read), and the web
-client in `src/` plays through them (2–4 seats, preset-sized boards,
-2.5 s state polling, server-validated commits). Setup and deploy steps:
+10 Edge Functions (rooms-*, game-*, rooms-state polling read, game-draft
+spectator stream), and the web client in `src/` plays through them (2–4
+seats, preset-sized boards, ~1 s state polling, live spectator board,
+server-validated commits). Setup and deploy steps:
 see `server/README.md`.
 
 ## Decisions (agreed)
@@ -21,10 +22,10 @@ see `server/README.md`.
 - Postgres tables: `rooms` (code, public flag, board preset, phase,
   `lastActivityAt`), `seats` (room, seat index, display name, connected),
   `games` (board, pool, turn pointer, meld flags, `winnerId`).
-- Nine Edge Functions (Deno/TypeScript): `rooms-create`, `rooms-join`,
+- Ten Edge Functions (Deno/TypeScript): `rooms-create`, `rooms-join`,
   `rooms-leave`, `game-start` (deal), `game-commit` (validate), `game-draw`,
-  `rooms-list` (lobby), `rooms-state` (polling read), `rooms-cleanup`.
-  All but the two reads are the only writers.
+  `game-draft` (live spectator draft), `rooms-list` (lobby), `rooms-state`
+  (polling read), `rooms-cleanup`. All but the two reads are the only writers.
 - Reads: room/game rows directly (pollable) plus Realtime subscription for
   live updates. Clients never write game state; RLS reflects that.
 - Shared logic, not forked: functions import `src/game/rules.ts`
@@ -61,7 +62,7 @@ Room codes keep today's 5-letter shape (`randomCode` alphabet).
 
 ## Deployment (automatic)
 
-- `supabase/` holds `config.toml`, SQL migrations, and the nine functions.
+- `supabase/` holds `config.toml`, SQL migrations, and the ten functions.
 - One command deploys everything to the linked project:
   `supabase db push` + `supabase functions deploy` (wrapped as
   `npm run server:deploy`).
@@ -77,7 +78,7 @@ Room codes keep today's 5-letter shape (`randomCode` alphabet).
 - Handler tests per function with a mocked Supabase client: happy paths plus
   full-room, unknown-code, wrong-turn, and validation-failure errors.
 - Gates: `npm test`, `tsc --noEmit`, migration dry-run, local function smoke
-  (valid + invalid payloads for all nine functions).
+  (valid + invalid payloads for all functions).
 
 ## Non-goals and open questions
 

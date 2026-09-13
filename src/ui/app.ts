@@ -21,7 +21,7 @@ import {
   type SortMode,
 } from '../game/board';
 import { attachTileDrag, installDoubleTapZoomGuard, type DragDest, type DragPayload, type TileDragHooks } from './drag';
-import type { Tile } from '../game/types';
+import type { BoardSet, Tile } from '../game/types';
 import { ServerApiError, api } from '../net/server';
 
 type Selection =
@@ -53,6 +53,8 @@ interface UiState {
   /** Last committed board as laid out locally. */
   board: Grid;
   draft: Grid | null;
+  /** Turn holder's live arrangement (for spectators; null when mine/absent). */
+  draftView: BoardSet[] | null;
   poolCount: number;
   turnSeat: number;
   phase: 'lobby' | 'playing' | 'gameover';
@@ -80,7 +82,7 @@ const el = (tag: string, cls = '', text = '') => {
 
 const TILE_LABEL: Record<string, string> = { red: 'R', blue: 'B', black: 'K', yellow: 'Y' };
 
-const POLL_MS = 2500;
+const POLL_MS = 1200;
 const LOBBY_POLL_MS = 5000;
 
 export function createApp() {
@@ -103,6 +105,7 @@ export function createApp() {
     turnStartRack: null,
     board: emptyGrid(),
     draft: null,
+    draftView: null,
     poolCount: 0,
     turnSeat: 0,
     phase: 'lobby',
@@ -239,6 +242,7 @@ export function createApp() {
     winnerSeat: number | null;
     seats: PublicSeat[];
     hand: Tile[] | null;
+    draftView: BoardSet[] | null;
   }) {
     const dims = BOARD_PRESETS[s.preset];
     state.preset = s.preset;
@@ -255,9 +259,10 @@ export function createApp() {
     const localIds = committedIds();
     const same = serverIds.size === localIds.size && [...serverIds].every((id) => localIds.has(id));
     if (!same) {
-      state.board = layoutSetsToGrid(s.board as import('../game/types').BoardSet[], dims.cols, dims.rows);
+      state.board = layoutSetsToGrid(s.board as BoardSet[], dims.cols, dims.rows);
       state.draft = null;
     }
+    state.draftView = s.draftView;
     syncRack(s.hand);
     state.serverOk = true;
   }
@@ -274,7 +279,7 @@ export function createApp() {
   }
 
   /** Rebuild staging + board straight from a response I caused. */
-  function adoptResponse(s: { board: import('../game/types').BoardSet[]; hand: Tile[] | null } & {
+  function adoptResponse(s: { board: BoardSet[]; hand: Tile[] | null } & {
     preset: BoardPresetName;
     poolCount: number;
     turnSeat: number;
@@ -293,6 +298,7 @@ export function createApp() {
     state.winnerSeat = s.winnerSeat;
     state.board = layoutSetsToGrid(s.board, dims.cols, dims.rows);
     state.draft = null;
+    state.draftView = null;
     state.selection = null;
     state.turnStartRack = null;
     if (s.hand) state.rack = rackFromTiles(sortTiles(s.hand, state.sortMode));
@@ -349,6 +355,37 @@ export function createApp() {
     loopPoll();
   }
 
+  // ---------- live draft broadcast (spectator view) ----------
+  let draftTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function cancelDraftBroadcast() {
+    if (draftTimer) {
+      clearTimeout(draftTimer);
+      draftTimer = null;
+    }
+  }
+
+  /** Stream my arrangement to spectators (debounced, fire-and-forget). */
+  function scheduleDraftBroadcast() {
+    if (!myTurn() || !state.draft) return;
+    if (draftTimer) clearTimeout(draftTimer);
+    draftTimer = setTimeout(() => {
+      draftTimer = null;
+      if (!myTurn() || !state.draft) return;
+      const sets = deriveSets(state.draft, state.cols, state.rows).map((d) => d.tiles);
+      void api.draftBoard({ code: state.code, seat: state.seat, board: sets }).catch(() => {
+        // Spectating is best-effort; the commit path reports real errors.
+      });
+    }, 400);
+  }
+
+  /** Tell spectators the arrangement cleared (revert); silent on failure. */
+  function publishDraftCleared() {
+    cancelDraftBroadcast();
+    if (state.screen !== 'game' || state.phase !== 'playing') return;
+    void api.draftBoard({ code: state.code, seat: state.seat, board: [] }).catch(() => {});
+  }
+
   function startLobbyPoll() {
     stopLobbyPoll();
     void refreshLobby();
@@ -379,6 +416,7 @@ export function createApp() {
 
   // ---------- room actions ----------
   function enterGame(code: string, seat: number) {
+    cancelDraftBroadcast();
     state.code = code;
     state.seat = seat;
     state.screen = 'game';
@@ -430,6 +468,7 @@ export function createApp() {
 
   async function doLeave() {
     stopPoll();
+    cancelDraftBroadcast();
     try {
       await api.leaveRoom({ code: state.code, seat: state.seat });
     } catch {
@@ -442,7 +481,7 @@ export function createApp() {
     stopPoll();
     Object.assign(state, {
       screen: 'lobby', code: '', seat: 0, seats: [], rack: emptyRack(), turnStartRack: null,
-      board: emptyGrid(), draft: null, poolCount: 0, turnSeat: 0, phase: 'lobby',
+      board: emptyGrid(), draft: null, draftView: null, poolCount: 0, turnSeat: 0, phase: 'lobby',
       winnerSeat: null, selection: null, justDrewId: null, message: '', busy: false,
     } as Partial<UiState>);
     wasMyTurn = false;
@@ -546,6 +585,7 @@ export function createApp() {
       return;
     }
     if (!s) return;
+    cancelDraftBroadcast();
     adoptResponse(s);
     if (s.drew) {
       state.justDrewId = s.drew.id;
@@ -591,6 +631,7 @@ export function createApp() {
       return;
     }
     if (!s) return;
+    cancelDraftBroadcast();
     if (state.justDrewId && placedIds.includes(state.justDrewId)) state.justDrewId = null;
     adoptResponse(s);
     if (s.winnerSeat !== null && s.winnerSeat !== undefined) {
@@ -607,6 +648,7 @@ export function createApp() {
     if (state.turnStartRack) state.rack = [...state.turnStartRack];
     state.draft = null;
     state.selection = null;
+    publishDraftCleared();
     say('Board and staging area reverted.');
     render();
   }
@@ -658,6 +700,7 @@ export function createApp() {
       state.draft = moved;
     }
     state.selection = null;
+    scheduleDraftBroadcast();
     render();
   }
 
@@ -700,6 +743,7 @@ export function createApp() {
       draft[s.cell] = occ;
       state.rack[slot] = tile;
       state.selection = null;
+      scheduleDraftBroadcast();
       render();
       return;
     }
@@ -726,6 +770,7 @@ export function createApp() {
     state.rack = moved.rack;
     state.selection = null;
     markManual();
+    scheduleDraftBroadcast();
     render();
   }
 
@@ -744,6 +789,10 @@ export function createApp() {
 
   function shownGrid(): Grid {
     if (myTurn()) return state.draft ?? state.board;
+    // Spectator view: the turn holder's live arrangement when published.
+    if (state.draftView && state.draftView.length > 0) {
+      return layoutSetsToGrid(state.draftView, state.cols, state.rows);
+    }
     return state.board;
   }
 
@@ -1005,7 +1054,7 @@ export function createApp() {
       state.winnerSeat !== null ? `Winner: ${seatName(state.winnerSeat)}`
         : state.phase === 'lobby' ? 'Waiting to start…'
           : myTurn() ? 'Your turn — arrange, then End Turn'
-            : `${seatName(state.turnSeat)}'s turn`);
+            : `${seatName(state.turnSeat)}'s turn${state.draftView ? ' · live' : ''}`);
     const soundBtn = el('button', 'secondary sound-toggle', state.soundOn ? 'Sound: on' : 'Sound: off') as HTMLButtonElement;
     soundBtn.title = 'Toggle the turn alert sound';
     soundBtn.onclick = toggleSound;

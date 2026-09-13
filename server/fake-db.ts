@@ -12,6 +12,7 @@ export function makeFakeDb(): Db {
     ...g,
     board: g.board.map((set) => [...set]),
     pool: [...g.pool],
+    draft: g.draft.map((set) => [...set]),
   });
 
   return {
