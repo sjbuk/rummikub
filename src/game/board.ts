@@ -35,6 +35,21 @@ export function sortTiles(hand: Tile[], mode: SortMode): Tile[] {
   return [...hand].sort((a, b) => compareTiles(a, b, mode));
 }
 
+/**
+ * Move the rack tile at `from` into the `gap` between tiles (0..hand.length).
+ * Dropping left of tile i is gap i, right of it gap i + 1, so the tile lands
+ * between its neighbours instead of swapping. Out-of-range input returns an
+ * unchanged copy.
+ */
+export function insertRackTile(hand: Tile[], from: number, gap: number): Tile[] {
+  const next = [...hand];
+  if (!Number.isInteger(from) || !Number.isInteger(gap)) return next;
+  if (from < 0 || from >= hand.length || gap < 0 || gap > hand.length) return next;
+  const [t] = next.splice(from, 1);
+  next.splice(gap > from ? gap - 1 : gap, 0, t);
+  return next;
+}
+
 export function cellRow(cell: number): number {
   return Math.floor(cell / GRID_COLS);
 }

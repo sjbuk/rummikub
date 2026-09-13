@@ -5,6 +5,7 @@ import {
   deriveSets,
   emptyGrid,
   findInvalidCells,
+  insertRackTile,
   moveSet,
   moveTile,
   sortTiles,
@@ -119,6 +120,8 @@ export function createApp() {
   };
 
   // ---------- turn alerts: banner, tab title, chime ----------
+  /** Set after a touch drag so the trailing click doesn't re-select the tile. */
+  let suppressTouchClick = false;
   let audioCtx: AudioContext | null = null;
   /** Turn state on the previous render — a false→true edge fires the alert. */
   let wasMyTurn = false;
@@ -489,13 +492,15 @@ export function createApp() {
     render();
   }
 
-  /** Move a rack tile from one slot to another, keeping the player's manual order. */
-  function moveRack(from: number, to: number) {
-    if (!Number.isInteger(from) || !Number.isInteger(to)) return;
-    if (from < 0 || from >= state.hand.length || to < 0 || to > state.hand.length) return;
-    if (from === to) return;
-    const [t] = state.hand.splice(from, 1);
-    state.hand.splice(to, 0, t);
+  /**
+   * Drop the rack tile at `from` into the `gap` between tiles (0..hand.length),
+   * keeping the player's manual order. A drop that changes nothing is a no-op.
+   */
+  function insertRack(from: number, gap: number) {
+    const next = insertRackTile(state.hand, from, gap);
+    const same = next.length === state.hand.length && next.every((t, i) => t.id === state.hand[i].id);
+    if (same) return;
+    state.hand = next;
     state.selection = null;
     // A hand-arranged rack is manual from here on — auto-sort would undo it.
     if (state.sortMode !== 'manual') {
@@ -680,8 +685,8 @@ export function createApp() {
       return;
     }
     if (s?.area === 'rack') {
-      // Tap two rack tiles to reorder — the rack becomes manual so the order sticks.
-      moveRack(s.index, i);
+      // Tap two rack tiles to reorder — the selected tile takes the tapped tile's place.
+      insertRack(s.index, s.index < i ? i + 1 : i);
       render();
       return;
     }
@@ -925,34 +930,163 @@ export function createApp() {
 
     const rack = el('div', `rack${myTurn() ? ' my-turn' : ''}`);
     const rackTiles = el('div', 'tiles');
+    const tileEls: HTMLElement[] = [];
+    const gapMarker = el('div', 'rack-gap');
+    const showGap = (gap: number) => {
+      rackTiles.insertBefore(gapMarker, tileEls[gap] ?? null);
+    };
+    const hideGap = () => gapMarker.remove();
+    const clearBoardDropTargets = () => {
+      boardEl.querySelectorAll('.drop-target').forEach((n) => n.classList.remove('drop-target'));
+    };
+
+    /**
+     * Gap (0..hand.length) between rack tiles nearest the pointer — a drop
+     * inserts there. Left half of a tile resolves before it, right half after.
+     */
+    function gapFromPoint(x: number, y: number): number {
+      if (tileEls.length === 0) return 0;
+      interface RowTile { idx: number; top: number; bottom: number; left: number; width: number }
+      const rows = new Map<number, RowTile[]>();
+      tileEls.forEach((node, idx) => {
+        const rect = node.getBoundingClientRect();
+        const key = Math.round(rect.top);
+        const row = rows.get(key) ?? [];
+        row.push({ idx, top: rect.top, bottom: rect.bottom, left: rect.left, width: rect.width });
+        rows.set(key, row);
+      });
+      let best: RowTile[] | null = null;
+      let bestDist = Infinity;
+      for (const row of rows.values()) {
+        const dist = y < row[0].top ? row[0].top - y : y > row[0].bottom ? y - row[0].bottom : 0;
+        if (dist < bestDist) { bestDist = dist; best = row; }
+      }
+      const row = (best ?? []).slice().sort((a, b) => a.idx - b.idx);
+      for (const entry of row) {
+        if (x < entry.left + entry.width / 2) return entry.idx;
+      }
+      return row.length === 0 ? tileEls.length : row[row.length - 1].idx + 1;
+    }
+
+    // Touch/pen rack dragging. iOS Safari has no HTML5 drag-and-drop, so touch
+    // uses pointer events; mouse keeps the native DnD path below. No render
+    // happens mid-drag, so these element references stay valid throughout.
+    interface RackTouchDrag {
+      pointerId: number;
+      from: number;
+      startX: number;
+      startY: number;
+      active: boolean;
+      dropKind: 'rack' | 'board' | null;
+      gap: number;
+      boardCell: number | null;
+      origin: HTMLElement;
+      clone: HTMLElement | null;
+    }
+    let touchDrag: RackTouchDrag | null = null;
+
+    function endTouchDragVisuals(td: RackTouchDrag) {
+      td.clone?.remove();
+      td.clone = null;
+      td.origin.classList.remove('dragging');
+      hideGap();
+      clearBoardDropTargets();
+    }
+
+    function updateTouchDrag(e: PointerEvent) {
+      const td = touchDrag;
+      if (!td || e.pointerId !== td.pointerId || !td.clone) return;
+      const size = td.origin.getBoundingClientRect();
+      // Float the clone above the fingertip so the gap marker stays visible.
+      td.clone.style.transform = `translate(${e.clientX - size.width / 2}px, ${e.clientY - size.height - 14}px)`;
+      const under = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+      const boardCellEl = under?.closest?.('.grid-board .cell') as HTMLElement | null;
+      if (under && rackTiles.contains(under)) {
+        td.dropKind = 'rack';
+        td.boardCell = null;
+        td.gap = gapFromPoint(e.clientX, e.clientY);
+        clearBoardDropTargets();
+        showGap(td.gap);
+      } else if (boardCellEl && myTurn() && boardEl.contains(boardCellEl)) {
+        td.dropKind = 'board';
+        td.boardCell = [...boardEl.children].indexOf(boardCellEl);
+        hideGap();
+        clearBoardDropTargets();
+        boardCellEl.classList.add('drop-target');
+      } else {
+        td.dropKind = null;
+        td.boardCell = null;
+        hideGap();
+        clearBoardDropTargets();
+      }
+    }
+
     state.hand.forEach((t, i) => {
       const sel = state.selection?.area === 'rack' && state.selection.index === i;
       const isNew = state.justDrewId !== null && t.id === state.justDrewId;
       const tEl = tileEl(t, `${sel ? 'selected' : ''} ${isNew ? 'just-drew' : ''}`.trim());
       if (isNew) tEl.title = 'Just drawn';
       tEl.setAttribute('draggable', 'true');
-      tEl.onclick = () => clickRackTile(i);
+      tEl.onclick = () => {
+        // A touch drag ends with a click on the dragged tile — swallow it.
+        if (suppressTouchClick) { suppressTouchClick = false; return; }
+        clickRackTile(i);
+      };
       tEl.ondragstart = (e) => {
         e.dataTransfer?.setData('text/rack', String(i));
         if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
       };
-      // Drop a dragged rack tile onto another to reorder the rack.
-      tEl.ondragover = (e) => {
-        if (!e.dataTransfer?.types.includes('text/rack')) return;
-        e.preventDefault();
-        e.dataTransfer.dropEffect = 'move';
-        tEl.classList.add('drop-before');
+      tEl.ondragend = () => hideGap();
+      tEl.onpointerdown = (e) => {
+        if (e.pointerType === 'mouse') return;
+        touchDrag = {
+          pointerId: e.pointerId, from: i, startX: e.clientX, startY: e.clientY,
+          active: false, dropKind: null, gap: i, boardCell: null, origin: tEl, clone: null,
+        };
       };
-      tEl.ondragleave = () => tEl.classList.remove('drop-before');
-      tEl.ondrop = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        tEl.classList.remove('drop-before');
-        const raw = e.dataTransfer?.getData('text/rack');
-        if (raw === undefined || raw === '') return;
-        moveRack(Number(raw), i);
-        render();
+      tEl.onpointermove = (e) => {
+        const td = touchDrag;
+        if (!td || e.pointerId !== td.pointerId) return;
+        if (!td.active) {
+          // Small slop so plain taps still click instead of dragging.
+          if (Math.hypot(e.clientX - td.startX, e.clientY - td.startY) < 10) return;
+          td.active = true;
+          try { td.origin.setPointerCapture(td.pointerId); } catch { /* drag continues without capture */ }
+          const r = td.origin.getBoundingClientRect();
+          const clone = td.origin.cloneNode(true) as HTMLElement;
+          clone.classList.add('drag-clone');
+          clone.classList.remove('selected', 'just-drew', 'dragging');
+          clone.style.width = `${r.width}px`;
+          clone.style.height = `${r.height}px`;
+          document.body.append(clone);
+          td.clone = clone;
+          td.origin.classList.add('dragging');
+        }
+        updateTouchDrag(e);
       };
+      tEl.onpointerup = (e) => {
+        const td = touchDrag;
+        if (!td || e.pointerId !== td.pointerId) return;
+        touchDrag = null;
+        if (!td.active) return; // plain tap — the click handler takes it
+        suppressTouchClick = true;
+        endTouchDragVisuals(td);
+        if (td.dropKind === 'board' && td.boardCell !== null && myTurn()) {
+          state.selection = { area: 'rack', index: td.from };
+          handleCellTarget(td.boardCell);
+        } else if (td.dropKind === 'rack') {
+          insertRack(td.from, td.gap);
+          render();
+        }
+        // Released anywhere else: the tile snaps back, nothing changes.
+      };
+      tEl.onpointercancel = (e) => {
+        const td = touchDrag;
+        if (!td || e.pointerId !== td.pointerId) return;
+        touchDrag = null;
+        if (td.active) endTouchDragVisuals(td);
+      };
+      tileEls.push(tEl);
       rackTiles.append(tEl);
     });
     rackTiles.onclick = (e) => {
@@ -971,24 +1105,29 @@ export function createApp() {
         }
       }
     };
+    // Mouse rack reorder: the drop inserts into the gap nearest the pointer.
     rackTiles.ondragover = (e) => {
+      if (!e.dataTransfer?.types.includes('text/rack')) return;
       e.preventDefault();
-      if (e.dataTransfer && e.dataTransfer.types.includes('text/rack')) e.dataTransfer.dropEffect = 'move';
+      e.dataTransfer.dropEffect = 'move';
+      showGap(gapFromPoint(e.clientX, e.clientY));
+    };
+    rackTiles.ondragleave = (e) => {
+      if (!rackTiles.contains(e.relatedTarget as Node | null)) hideGap();
     };
     rackTiles.ondrop = (e) => {
-      // Tile-level drops stop propagation; reaching here means empty rack space → move to the end.
-      if ((e.target as HTMLElement).closest('.tile')) return;
       const raw = e.dataTransfer?.getData('text/rack');
       if (raw === undefined || raw === '') return;
       e.preventDefault();
-      moveRack(Number(raw), state.hand.length);
+      hideGap();
+      insertRack(Number(raw), gapFromPoint(e.clientX, e.clientY));
       render();
     };
     rack.append(el('h3', '', `${state.name || 'You'} — your rack (${state.hand.length})`));
     rack.append(el('p', 'muted rack-hint',
       state.sortMode === 'manual'
-        ? 'Manual order — drag tiles to rearrange; new tiles join the right end.'
-        : 'Tip: drag a rack tile onto another to arrange it yourself (switches to manual).'));
+        ? 'Manual order — drag tiles between each other to rearrange (touch works too); new tiles join the right end.'
+        : 'Tip: drag a rack tile between others to arrange it yourself (switches to manual).'));
     rack.append(rackTiles);
 
     const toolbar = el('div', 'toolbar');

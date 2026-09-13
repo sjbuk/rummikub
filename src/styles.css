@@ -175,7 +175,27 @@ button:not(:disabled):hover { filter: brightness(1.06); }
 /* Gold frame on the rack while it's your turn. */
 .rack.my-turn { border-color: var(--gold); box-shadow: 0 0 0 1px var(--gold), 0 8px 24px rgba(0, 0, 0, 0.35); }
 .rack-hint { font-size: 12px; margin: 0 0 8px; }
-.tile.drop-before { outline: 3px solid var(--gold); outline-offset: -1px; }
+/* Rack tiles own their touch gestures so finger-drags reorder instead of scrolling. */
+.rack .tiles .tile { touch-action: none; -webkit-touch-callout: none; }
+/* Gold bar marking the gap a dragged rack tile will insert into. */
+.rack-gap {
+  width: 6px;
+  align-self: stretch;
+  border-radius: 3px;
+  background: var(--gold);
+  box-shadow: 0 0 8px rgba(242, 193, 78, 0.8);
+}
+/* Floating copy of the tile under the fingertip during a touch drag. */
+.drag-clone {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 60;
+  margin: 0;
+  pointer-events: none;
+  opacity: 0.92;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.5);
+}
 .sound-toggle { padding: 6px 12px; border-radius: 999px; font-size: 14px; font-weight: 600; }
 
 .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }

@@ -5,6 +5,7 @@ import {
   deriveSets,
   emptyGrid,
   findInvalidCells,
+  insertRackTile,
   layoutSetsToGrid,
   moveSet,
   moveTile,
@@ -83,6 +84,26 @@ describe('slot grid', () => {
     const sorted = sortTiles(hand, 'manual');
     expect(sorted.map((t) => t.id)).toEqual(['b3', 'r11', 'b1', 'r2', 'j1']);
     expect(sorted).not.toBe(hand); // a copy, so later pushes can't alias the old rack
+  });
+  it('inserts a dragged rack tile into a gap instead of swapping', () => {
+    const hand = [num(1, 'a'), num(2, 'b'), num(3, 'c'), num(4, 'd')];
+    // Drop a left of the gap before c.
+    expect(insertRackTile(hand, 0, 2).map((t) => t.id)).toEqual(['b', 'a', 'c', 'd']);
+    // Drop d into the gap after a.
+    expect(insertRackTile(hand, 3, 1).map((t) => t.id)).toEqual(['a', 'd', 'b', 'c']);
+    // Drop b to the end.
+    expect(insertRackTile(hand, 1, 4).map((t) => t.id)).toEqual(['a', 'c', 'd', 'b']);
+    // Dropping back into its own gap is a no-op.
+    expect(insertRackTile(hand, 1, 2).map((t) => t.id)).toEqual(['a', 'b', 'c', 'd']);
+  });
+  it('ignores out-of-range rack gaps without mutating', () => {
+    const hand = [num(1, 'a'), num(2, 'b')];
+    expect(insertRackTile(hand, 5, 0).map((t) => t.id)).toEqual(['a', 'b']);
+    expect(insertRackTile(hand, 0, 9).map((t) => t.id)).toEqual(['a', 'b']);
+    expect(insertRackTile(hand, NaN, 0).map((t) => t.id)).toEqual(['a', 'b']);
+    const out = insertRackTile(hand, 0, 1);
+    expect(out).not.toBe(hand);
+    expect(hand.map((t) => t.id)).toEqual(['a', 'b']);
   });
   it('leaves same-number tiles in rack order when sorting by number', () => {
     const hand = [blue(5, 'b5'), num(2, 'r2'), num(5, 'r5'), blue(2, 'b2'), { id: 'j1', kind: 'joker' } as Tile];
