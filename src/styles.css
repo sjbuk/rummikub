@@ -126,6 +126,14 @@ button:not(:disabled):hover { filter: brightness(1.06); }
 .tile.yellow { color: var(--yellow); }
 .tile.joker { background: linear-gradient(180deg, #fff3c4, #ffd873); color: #7a4d00; }
 .tile.selected { outline: 3px solid var(--gold); transform: translateY(-3px); }
+.tile.just-drew { position: relative; outline: 2px solid var(--gold); }
+.tile.just-drew::after {
+  content: '';
+  position: absolute; top: 4px; right: 4px;
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--gold);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+}
 .tile.dragging { opacity: 0.4; }
 
 .rack {

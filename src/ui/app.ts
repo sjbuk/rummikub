@@ -38,6 +38,8 @@ interface UiState {
   melded: boolean;
   peerMelded: boolean;
   peerHandCount: number;
+  /** Id of the most recently drawn rack tile, for the "new tile" marker. */
+  justDrewId: string | null;
   winner: Role | null;
   selection: Selection;
   sortMode: SortMode;
@@ -77,6 +79,7 @@ export function createApp() {
     melded: false,
     peerMelded: false,
     peerHandCount: HAND_SIZE,
+    justDrewId: null,
     winner: null,
     selection: null,
     sortMode: 'color',
@@ -147,6 +150,7 @@ export function createApp() {
     state.melded = false;
     state.peerMelded = false;
     state.peerHandCount = HAND_SIZE;
+    state.justDrewId = null;
     state.winner = null;
     state.dealt = true;
     net?.send({
@@ -182,6 +186,7 @@ export function createApp() {
           state.peerView = null;
           state.turn = msg.turn as Role;
           state.peerHandCount = HAND_SIZE;
+          state.justDrewId = null;
           state.winner = null;
           say(state.turn === state.role ? 'Dealt! You start — meld 30+ or draw.' : `${state.peerName} starts.`, 'ok');
           render();
@@ -227,6 +232,7 @@ export function createApp() {
       case 'drawGrant':
         if (msg.to === state.role) {
           state.hand.push(msg.tile);
+          state.justDrewId = msg.tile.id;
           sortHand();
           state.poolCount = msg.poolCount;
           state.turn = msg.turn as Role;
@@ -289,6 +295,7 @@ export function createApp() {
         return;
       }
       state.hand.push(tile);
+      state.justDrewId = tile.id;
       sortHand();
       state.poolCount = state.pool.length;
       state.turn = 'guest';
@@ -324,6 +331,7 @@ export function createApp() {
     }
     const placedSet = new Set(placedIds);
     state.hand = state.hand.filter((t) => !placedSet.has(t.id));
+    if (state.justDrewId && !state.hand.some((t) => t.id === state.justDrewId)) state.justDrewId = null;
     // Commit the grid as arranged — positions are preserved for both players.
     state.board = [...grid];
     state.draft = null;
@@ -565,7 +573,7 @@ export function createApp() {
       net = null;
       Object.assign(state, {
         screen: 'lobby', hand: [], board: emptyGrid(), draft: null, peerView: null, pool: [],
-        winner: null, dealt: false, connected: false, message: '',
+        winner: null, dealt: false, connected: false, message: '', justDrewId: null,
       } as Partial<UiState>);
       render();
     };
@@ -655,7 +663,9 @@ export function createApp() {
     const rackTiles = el('div', 'tiles');
     state.hand.forEach((t, i) => {
       const sel = state.selection?.area === 'rack' && state.selection.index === i;
-      const tEl = tileEl(t, sel ? 'selected' : '');
+      const isNew = state.justDrewId !== null && t.id === state.justDrewId;
+      const tEl = tileEl(t, `${sel ? 'selected' : ''} ${isNew ? 'just-drew' : ''}`.trim());
+      if (isNew) tEl.title = 'Just drawn';
       tEl.setAttribute('draggable', 'true');
       tEl.onclick = () => clickRackTile(i);
       tEl.ondragstart = (e) => { e.dataTransfer?.setData('text/rack', String(i)); };
