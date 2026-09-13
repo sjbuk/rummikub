@@ -23,14 +23,40 @@ export interface DragDest {
 }
 
 /**
- * Backstop against iPad double-tap-to-zoom for the two-tap set grab.
- * Safari fires `dblclick` on double-tap and can smart-zoom from it on paths
- * `touch-action` doesn't cover (older iOS ignores `touch-action` entirely,
- * and the grids re-render between the two taps). Cancelling `dblclick`
- * suppresses that zoom; single taps and clicks are unaffected.
+ * Window/distance in which a second tap counts as a double-tap. Sized to
+ * cover the set-grab gesture (450ms in app.ts) and Safari's own window.
  */
-export function suppressDoubleTapZoom(target: Pick<HTMLElement, 'addEventListener'>): void {
-  target.addEventListener('dblclick', (e) => e.preventDefault(), { passive: false });
+export const DOUBLE_TAP_GUARD_MS = 500;
+export const DOUBLE_TAP_GUARD_PX = 40;
+
+/**
+ * Blocks iPad double-tap-to-zoom on the two-tap set grab.
+ *
+ * Safari's smart zoom is the default action of the second tap's `touchend`,
+ * so that — not `dblclick`, which fires after the zoom decision — is the
+ * event to cancel. Only tile taps are cancelled: they travel the Pointer
+ * Events path, which cancellation leaves intact, while empty cells and
+ * buttons rely on compat click and are never touched.
+ */
+export function installDoubleTapZoomGuard(target: Pick<HTMLElement, 'addEventListener'>): void {
+  let last: { time: number; x: number; y: number } | null = null;
+  target.addEventListener('touchend', (e) => {
+    const ev = e as TouchEvent;
+    const touch = ev.changedTouches && ev.changedTouches[0];
+    if (!touch) return;
+    const now = Date.now();
+    if (
+      last &&
+      now - last.time < DOUBLE_TAP_GUARD_MS &&
+      Math.hypot(touch.clientX - last.x, touch.clientY - last.y) < DOUBLE_TAP_GUARD_PX
+    ) {
+      const t = ev.target as Element | null;
+      if (typeof t?.closest === 'function' && t.closest('.tile')) {
+        ev.preventDefault();
+      }
+    }
+    last = { time: now, x: touch.clientX, y: touch.clientY };
+  }, { passive: false });
 }
 
 export interface TileDragHooks {

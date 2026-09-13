@@ -19,7 +19,7 @@ import {
   type Grid,
   type SortMode,
 } from '../game/board';
-import { attachTileDrag, suppressDoubleTapZoom, type DragDest, type DragPayload, type TileDragHooks } from './drag';
+import { attachTileDrag, installDoubleTapZoomGuard, type DragDest, type DragPayload, type TileDragHooks } from './drag';
 import type { Tile } from '../game/types';
 import { makeLobbyRoom, makeRoom, randomCode, type LobbyHandle, type NetHandle, type NetMessage } from '../net/p2p';
 import {
@@ -183,8 +183,8 @@ export function createApp() {
   const unlockAudio = () => { ensureAudio(); };
   window.addEventListener('pointerdown', unlockAudio, { once: true });
   window.addEventListener('keydown', unlockAudio, { once: true });
-  // #app persists across re-renders, so one listener covers every tile.
-  suppressDoubleTapZoom(root);
+  // #app persists across re-renders, so one guard covers every tile.
+  installDoubleTapZoomGuard(root);
 
   function toggleSound() {
     state.soundOn = !state.soundOn;
